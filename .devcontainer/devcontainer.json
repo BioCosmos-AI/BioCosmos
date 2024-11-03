@@ -19,7 +19,8 @@
     "MONGO__HOST": "mongo",
     "MONGO__USERNAME": "root",
     "MONGO__PASSWORD": "example",
-    "MONGO__DATABASE": "NHFM"
+    "MONGO__DATABASE": "NHFM",
+    "OLLAMA_HOST": "http://ollama:11434"
   },
   // Use 'forwardPorts' to make a list of ports inside the container available locally.
   "forwardPorts": [
@@ -30,7 +31,8 @@
     5432,
     6379,
     27017, // Mongo DB
-    8888 // Jupyter Notebook
+    8888, // Jupyter Notebook
+    11434
   ],
   // Configure tool-specific properties.
   // "customizations": {},
@@ -45,5 +47,5 @@
   // "remoteUser": "root",
   // Use 'postCreateCommand' to run commands after the container is created.
   "remoteUser": "vscode",
-  "postCreateCommand": "bin/setup"
+  "postCreateCommand": "bin/setup && ollama pull internvl2"
 }

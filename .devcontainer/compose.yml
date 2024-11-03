@@ -104,9 +104,21 @@ services:
       JUPYTER_ENABLE_LAB: "yes"
       JUPYTER_TOKEN: "this_is_the_token"
 
+  ollama:
+    build:
+      context: ../
+      dockerfile: ./ollama/Dockerfile
+    volumes:
+      - ollama-data:/root/.ollama
+    ports:
+      - 11434:11434
+    networks:
+      - default
+
 volumes:
   postgres-data:
   redis-data:
+  ollama-data:
 
 networks:
   frontend:
