@@ -29,7 +29,7 @@ def reorganize_vlm4bio_dataset(base_dir="data/VLM4Bio/datasets"):
         for chunk_dir in chunk_dirs:
             # Move images
             image_files = []
-            for ext in ['*.jpg', '*.jpeg', '*.png']:
+            for ext in ['*.jpg', '*.JPG', '*.jpeg', '*.JPEG', '*.png', '*.PNG']:
                 image_files.extend(glob.glob(os.path.join(chunk_dir, ext)))
                 image_files.extend(glob.glob(os.path.join(chunk_dir, '**', ext)))
             
