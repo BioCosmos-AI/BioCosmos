@@ -62,6 +62,7 @@ local_rank = int(os.getenv("LOCAL_RANK", "0"))
 world_size = int(os.getenv("WORLD_SIZE", "1"))
 torch.cuda.set_device(local_rank)
 
+
 class Config:
     def __init__(self):
         # Default values
@@ -88,11 +89,11 @@ class Config:
         self.seed = 1024
         self.transform = None
         self.weight_decay = 0
-        self.output_dim = 512 if "B/32" in self.model_name else (
-            768 if "B/16" in self.model_name else 1024
+        self.output_dim = (
+            512
+            if "B/32" in self.model_name
+            else (768 if "B/16" in self.model_name else 1024)
         )
-
-
 
 
 def get_dataset(dataset_name: str, transform: Callable, transform_train=None) -> Dict:
@@ -102,6 +103,7 @@ def get_dataset(dataset_name: str, transform: Callable, transform_train=None) ->
 
     if dataset_name == "sop":
         from dataset import SOP
+
         trainset = SOP(root, "train", transform_train)
         testset = SOP(root, "eval", transform)
         trainset.num_classes = trainset.nb_classes()
@@ -109,6 +111,7 @@ def get_dataset(dataset_name: str, transform: Callable, transform_train=None) ->
 
     elif dataset_name == "cub":
         from dataset import CUBirds
+
         trainset = CUBirds(root, "train", transform_train)
         testset = CUBirds(root, "eval", transform)
         trainset.num_classes = trainset.nb_classes()
@@ -116,6 +119,7 @@ def get_dataset(dataset_name: str, transform: Callable, transform_train=None) ->
 
     elif dataset_name == "car":
         from dataset import Cars
+
         trainset = Cars(root, "train", transform_train)
         testset = Cars(root, "eval", transform)
         trainset.num_classes = trainset.nb_classes()
@@ -123,13 +127,20 @@ def get_dataset(dataset_name: str, transform: Callable, transform_train=None) ->
 
     elif dataset_name == "inshop":
         from dataset import Inshop_Dataset
+
         trainset = Inshop_Dataset(root, "train", transform_train)
         query = Inshop_Dataset(root, "query", transform)
         gallery = Inshop_Dataset(root, "gallery", transform)
         trainset.num_classes = trainset.nb_classes()
-        return {"train": trainset, "query": query, "gallery": gallery, "metric": "rank1"}
+        return {
+            "train": trainset,
+            "query": query,
+            "gallery": gallery,
+            "metric": "rank1",
+        }
     elif dataset_name == "inat":
         from dataset import inaturalist
+
         trainset = inaturalist.get_trainset(root, transform_train)
         testset = inaturalist.get_testset(root, transform)
         trainset.num_classes = 5690
@@ -143,7 +154,7 @@ class WarpModule(torch.nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self,  x):
+    def forward(self, x):
         return self.model(x)
 
 
@@ -152,26 +163,26 @@ class CustomClusteredDataset(Dataset):
     def __init__(self, cluster_results_path, transform=None):
         self.df = pd.read_csv(cluster_results_path)
         self.transform = transform
-        self.num_classes = self.df['cluster_id'].nunique()
-        
+        self.num_classes = self.df["cluster_id"].nunique()
+
         # Clean and convert paths
         base_dir = os.path.dirname(os.path.abspath(cluster_results_path))
-        self.df['image_path'] = self.df['image_path'].apply(
+        self.df["image_path"] = self.df["image_path"].apply(
             lambda x: os.path.abspath(os.path.join(base_dir, x.strip()))
         )
-        
+
         # Print first few paths to verify
         print("First few image paths:")
-        print(self.df['image_path'].head())
-        
+        print(self.df["image_path"].head())
+
     def __len__(self):
         return len(self.df)
-    
+
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        image_path = row['image_path']
-        cluster_id = row['cluster_id']
-        
+        image_path = row["image_path"]
+        cluster_id = row["cluster_id"]
+
         try:
             image = PIL.Image.open(image_path)
             if self.transform:
@@ -180,6 +191,7 @@ class CustomClusteredDataset(Dataset):
         except Exception as e:
             print(f"Error loading image {image_path}: {e}")
             raise
+
 
 # def main():
 #     if world_size >= 1:
@@ -335,17 +347,17 @@ class CustomClusteredDataset(Dataset):
 # def main(config=None):
 #     if config is None:
 #         config = Config()
-    
+
 #     # Make config globally available as args
 #     global args
 #     args = config
-    
+
 #     # Initialize distributed processing with a single process
 #     os.environ['MASTER_ADDR'] = 'localhost'
 #     os.environ['MASTER_PORT'] = '12355'
 #     distributed.init_process_group(backend='nccl', world_size=1, rank=0)
 
-    
+
 #     # Load model and initialize
 #     model, transform_clip = clip.load(args.model_name)
 #     model = WarpModule(model)
@@ -382,7 +394,7 @@ class CustomClusteredDataset(Dataset):
 
 
 #     module_partial_fc = PartialFC_V2(
-#         margin_loss, 
+#         margin_loss,
 #         args.output_dim,
 #         dataset_train.num_classes,
 #         args.sample_rate,
@@ -420,15 +432,15 @@ class CustomClusteredDataset(Dataset):
 #     for epoch in range(args.epochs):
 #         if train_sampler is not None:
 #             train_sampler.set_epoch(epoch)
-            
+
 #         for _, (img, local_labels) in enumerate(loader_train):
 #             img = img.cuda()
 #             local_labels = local_labels.long().cuda()
-            
+
 #             with torch.cuda.amp.autocast(False):
 #                 local_embeddings = backbone(img)
 #             local_embeddings.float()
-            
+
 #             loss = module_partial_fc(local_embeddings, local_labels)
 #             auto_scaler.scale(loss).backward()
 
@@ -459,22 +471,23 @@ def main(config=None):
     print("Current working directory:", os.getcwd())
     if config is None:
         config = Config()
-    
+
     # Make config globally available as args
     global args
     args = config
-    
-    # Initialize distributed processing with a single process
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-    distributed.init_process_group(backend='nccl', world_size=1, rank=0)
 
-    
+    # Initialize distributed processing with a single process
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+    distributed.init_process_group(backend="nccl", world_size=1, rank=0)
+
     # Load model and initialize
     model, transform_clip = clip.load(args.model_name)
     # Use only the vision encoder part of CLIP
     model = model.visual
-    model = model.float()  # Convert to full precision because that's what the rest of the unicom seems to want
+    model = (
+        model.float()
+    )  # Convert to full precision because that's what the rest of the unicom seems to want
 
     model = WarpModule(model)
     model.train()
@@ -482,8 +495,7 @@ def main(config=None):
 
     # Create dataset and loader
     dataset_train = CustomClusteredDataset(
-        cluster_results_path='clustering_results.csv',
-        transform=transform_clip
+        cluster_results_path="clustering_results.csv", transform=transform_clip
     )
 
     loader_train = DataLoader(
@@ -492,7 +504,7 @@ def main(config=None):
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=True,
-        shuffle=True
+        shuffle=True,
     )
 
     backbone = model
@@ -502,27 +514,30 @@ def main(config=None):
         args.margin_loss_m1,
         args.margin_loss_m2,
         args.margin_loss_m3,
-        args.margin_loss_filter
+        args.margin_loss_filter,
     )
 
     module_partial_fc = PartialFC_V2(
-        margin_loss, 
+        margin_loss,
         args.output_dim,
         dataset_train.num_classes,
         args.sample_rate,
         False,
         sample_num_feat=args.num_feat,
-#         use_distributed=False
+        #         use_distributed=False
     )
     module_partial_fc.train().cuda()
 
     opt = torch.optim.AdamW(
         params=[
             {"params": backbone.parameters()},
-            {"params": module_partial_fc.parameters(), "lr": args.lr * args.lr_pfc_weight}
+            {
+                "params": module_partial_fc.parameters(),
+                "lr": args.lr * args.lr_pfc_weight,
+            },
         ],
         lr=args.lr,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
     )
 
     steps_per_epoch = len(dataset_train) // args.batch_size + 1
@@ -538,18 +553,54 @@ def main(config=None):
     auto_scaler = torch.cuda.amp.grad_scaler.GradScaler(growth_interval=200)
     global_step = 0
 
+    save_dir = "checkpoints"
+    os.makedirs(save_dir, exist_ok=True)
+
+    best_loss = float("inf")
+
+    # Create directory for logs if it doesn't exist
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Create a log file with timestamp
+    timestr = time.strftime("%Y%m%d-%H%M%S")
+    log_file = os.path.join(log_dir, f"training_log_{timestr}.csv")
+
+    # Initialize log file with headers
+    with open(log_file, "w") as f:
+        f.write(
+            "epoch,batch,global_step,loss,learning_rate_backbone,learning_rate_pfc\n"
+        )
+
     # Main training loop - removed train_sampler check
     for epoch in range(args.epochs):
-        for _, (img, local_labels) in enumerate(loader_train):
+        running_loss = 0.0
+        batch_losses = []
+
+        for batch_idx, (img, local_labels) in enumerate(loader_train):
             img = img.cuda()
             local_labels = local_labels.long().cuda()
-            
+
             with torch.cuda.amp.autocast(False):
                 local_embeddings = backbone(img)
             local_embeddings.float()
-            
+
             loss = module_partial_fc(local_embeddings, local_labels)
             auto_scaler.scale(loss).backward()
+
+            current_loss = loss.item()
+            running_loss += current_loss
+            batch_losses.append(current_loss)
+
+            # Get current learning rates
+            lr_backbone = lr_scheduler.get_last_lr()[0]
+            lr_pfc = lr_scheduler.get_last_lr()[1]
+
+            # Log to file
+            with open(log_file, "a") as f:
+                f.write(
+                    f"{epoch},{batch_idx},{global_step},{current_loss},{lr_backbone},{lr_pfc}\n"
+                )
 
             if global_step % args.gradient_acc == 0:
                 auto_scaler.step(opt)
@@ -561,15 +612,31 @@ def main(config=None):
 
             with torch.no_grad():
                 callback_func(
-                    lr_scheduler,
-                    float(loss),
-                    global_step,
-                    auto_scaler.get_scale()
+                    lr_scheduler, float(loss), global_step, auto_scaler.get_scale()
                 )
 
-        print(f"Completed epoch {epoch}")
+        epoch_loss = running_loss / len(loader_train)
+        epoch_std = np.std(batch_losses)
+
+        checkpoint = {
+            "epoch": epoch,
+            "model_state_dict": backbone.state_dict(),
+            "optimizer_state_dict": opt.state_dict(),
+            "loss": epoch_loss,
+            "config": args,
+        }
+        torch.save(checkpoint, f"{save_dir}/latest_checkpoint.pt")
+        if epoch_loss < best_loss:
+            best_loss = epoch_loss
+            torch.save(checkpoint, f"{save_dir}/best_checkpoint.pt")
+
+        print(f"Epoch {epoch}")
+        print(f"Average loss: {epoch_loss:.4f}")
+        print(f"Loss std: {epoch_std:.4f}")
+        print("----------------------------------------")
 
     print("Training completed")
+    return log_file
 
 
 class SpeedCallBack(object):
@@ -586,11 +653,8 @@ class SpeedCallBack(object):
         self.tic = 0
 
     def __call__(
-            self,
-            lr_scheduler: optim.lr_scheduler._LRScheduler,
-            loss,
-            global_step,
-            scale):
+        self, lr_scheduler: optim.lr_scheduler._LRScheduler, loss, global_step, scale
+    ):
         assert isinstance(loss, float)
 
         self.loss_metric.update(loss)
@@ -598,8 +662,7 @@ class SpeedCallBack(object):
             if self.init:
                 try:
                     speed: float = (
-                        self.frequent * self.batch_size /
-                        (time.time() - self.tic)
+                        self.frequent * self.batch_size / (time.time() - self.tic)
                     )
                     self.tic = time.time()
                     speed_total = speed * self.world_size
@@ -643,19 +706,20 @@ def euclidean_distance(x, y, topk=2):
 
 @torch.no_grad()
 def get_metric(
-        query: torch.Tensor,
-        query_label: list,
-        gallery: torch.Tensor = None,
-        gallery_label: list = None,
-        l2norm=True,
-        metric="rank1"):
+    query: torch.Tensor,
+    query_label: list,
+    gallery: torch.Tensor = None,
+    gallery_label: list = None,
+    l2norm=True,
+    metric="rank1",
+):
 
     if gallery is None:
         query = query.cuda()
         if l2norm:
             query = normalize(query)
         if args.num_feat is not None:
-            query = query[:, :args.num_feat]
+            query = query[:, : args.num_feat]
         query_label = query_label
         list_pred = []
         num_feat = query.size(0)
@@ -688,8 +752,8 @@ def get_metric(
             query = normalize(query)
             gallery = normalize(gallery)
         if args.num_feat is not None:
-            query = query[:, :args.num_feat]
-            gallery = gallery[:, :args.num_feat]
+            query = query[:, : args.num_feat]
+            gallery = gallery[:, : args.num_feat]
         num_feat = query.size(0)
 
         idx = 0
@@ -713,11 +777,9 @@ def get_metric(
         return rank_1 * 100
 
 
-def get_transform(
-        image_size: int = 224,
-        is_train: bool = True
-):
+def get_transform(image_size: int = 224, is_train: bool = True):
     from timm.data import create_transform
+
     mean = (0.48145466, 0.4578275, 0.40821073)
     std = (0.26862954, 0.26130258, 0.27577711)
 
@@ -728,7 +790,7 @@ def get_transform(
             is_training=True,
             color_jitter=args.color_jitter,
             auto_augment=args.aa,
-            interpolation='bicubic',
+            interpolation="bicubic",
             re_prob=args.reprob,
             re_mode=args.remode,
             re_count=args.recount,
@@ -850,17 +912,13 @@ class DistributedSampler(_DistributedSampler):
         ]
         assert len(indices) == self.total_size
         # subsample
-        indices = indices[self.rank: self.total_size: self.num_replicas]
+        indices = indices[self.rank : self.total_size : self.num_replicas]
         assert len(indices) == self.num_samples
         return iter(indices)
 
 
 @torch.no_grad()
-def get_metric_google_landmark(
-        x_query,
-        y_query,
-        x_gallery,
-        y_gallery) -> str:
+def get_metric_google_landmark(x_query, y_query, x_gallery, y_gallery) -> str:
     x_query = x_query.cuda()
     x_gallery = x_gallery.cuda()
 
@@ -899,23 +957,17 @@ def get_metric_google_landmark(
 
 
 def extract_feat(
-        model: torch.nn.Module,
-        dataset: Dataset,
-        batch_size: int,
-        num_workers: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    model: torch.nn.Module, dataset: Dataset, batch_size: int, num_workers: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
     model.cuda()
     model.eval()
     n_data = len(dataset)
     idx_all_rank = list(range(n_data))
     num_local = n_data // world_size + int(rank < n_data % world_size)
     start = n_data // world_size * rank + min(rank, n_data % world_size)
-    idx_this_rank = idx_all_rank[start:start + num_local]
+    idx_this_rank = idx_all_rank[start : start + num_local]
     dataset_this_rank = Subset(dataset, idx_this_rank)
-    kwargs = {
-        "batch_size": batch_size,
-        "num_workers": num_workers,
-        "drop_last": False
-    }
+    kwargs = {"batch_size": batch_size, "num_workers": num_workers, "drop_last": False}
     dataloader = DataLoader(dataset_this_rank, **kwargs)
     x = None
     y_np = []
@@ -928,7 +980,7 @@ def extract_feat(
         if x is None:
             size = [len(dataset_this_rank), embedding_size]
             x = torch.zeros(*size, device=image.device)
-        x[idx:idx + embedding.size(0)] = embedding
+        x[idx : idx + embedding.size(0)] = embedding
         y_np.append(np.array(label))
         idx += embedding.size(0)
     x = x.cpu()
@@ -946,20 +998,22 @@ def extract_feat(
 
 
 @torch.no_grad()
-def evaluation(model: torch.nn.Module,
-               dataset_dict: Dict, batch_size: int, num_workers: int):
+def evaluation(
+    model: torch.nn.Module, dataset_dict: Dict, batch_size: int, num_workers: int
+):
 
     if "index" in dataset_dict:
         val, val_label = extract_feat(
-            model, dataset_dict["val"], batch_size, num_workers)
+            model, dataset_dict["val"], batch_size, num_workers
+        )
         test, test_label = extract_feat(
-            model, dataset_dict["test"], batch_size, num_workers)
+            model, dataset_dict["test"], batch_size, num_workers
+        )
         index, index_label = extract_feat(
-            model, dataset_dict["index"], batch_size, num_workers)
-        metric_val = get_metric_google_landmark(
-            val, val_label, index, index_label)
-        metric_test = get_metric_google_landmark(
-            test, test_label, index, index_label)
+            model, dataset_dict["index"], batch_size, num_workers
+        )
+        metric_val = get_metric_google_landmark(val, val_label, index, index_label)
+        metric_test = get_metric_google_landmark(test, test_label, index, index_label)
         return metric_test, metric_val
 
     elif "test" in dataset_dict:
@@ -973,8 +1027,9 @@ def evaluation(model: torch.nn.Module,
         dataset_g = dataset_dict["gallery"]
         q, q_label = extract_feat(model, dataset_q, batch_size, num_workers)
         g, g_label = extract_feat(model, dataset_g, batch_size, num_workers)
-        metric = get_metric(query=q, query_label=q_label,
-                            gallery=g, gallery_label=g_label)
+        metric = get_metric(
+            query=q, query_label=q_label, gallery=g, gallery_label=g_label
+        )
         return metric
 
 
@@ -1006,20 +1061,20 @@ class AverageMeter(object):
 
 def mean_average_precision(predictions, retrieval_solution, max_predictions=100):
     """Computes mean average precision for retrieval prediction.
-  Args:
-    predictions: Dict mapping test image ID to a list of strings corresponding
-      to index image IDs.
-    retrieval_solution: Dict mapping test image ID to list of ground-truth image
-      IDs.
-    max_predictions: Maximum number of predictions per query to take into
-      account. For the Google Landmark Retrieval challenge, this should be set
-      to 100.
-  Returns:
-    mean_ap: Mean average precision score (float).
-  Raises:
-    ValueError: If a test image in `predictions` is not included in
-      `retrieval_solutions`.
-  """
+    Args:
+      predictions: Dict mapping test image ID to a list of strings corresponding
+        to index image IDs.
+      retrieval_solution: Dict mapping test image ID to list of ground-truth image
+        IDs.
+      max_predictions: Maximum number of predictions per query to take into
+        account. For the Google Landmark Retrieval challenge, this should be set
+        to 100.
+    Returns:
+      mean_ap: Mean average precision score (float).
+    Raises:
+      ValueError: If a test image in `predictions` is not included in
+        `retrieval_solutions`.
+    """
     # Compute number of test images.
     num_test_images = len(retrieval_solution.keys())
 
@@ -1027,15 +1082,13 @@ def mean_average_precision(predictions, retrieval_solution, max_predictions=100)
     mean_ap = 0.0
     for key, prediction in predictions.items():
         if key not in retrieval_solution:
-            raise ValueError(
-                'Test image %s is not part of retrieval_solution' % key)
+            raise ValueError("Test image %s is not part of retrieval_solution" % key)
 
         # Loop over predicted images, keeping track of those which were already
         # used (duplicates are skipped).
         ap = 0.0
         already_predicted = set()
-        num_expected_retrieved = min(
-            len(retrieval_solution[key]), max_predictions)
+        num_expected_retrieved = min(len(retrieval_solution[key]), max_predictions)
         num_correct = 0
         for i in range(min(len(prediction), max_predictions)):
             if prediction[i] not in already_predicted:

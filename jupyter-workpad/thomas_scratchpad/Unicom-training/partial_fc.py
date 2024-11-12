@@ -7,12 +7,7 @@ from torch.nn.functional import linear, normalize
 
 
 class CombinedMarginLoss(torch.nn.Module):
-    def __init__(self,
-                 s,
-                 m1,
-                 m2,
-                 m3,
-                 interclass_filtering_threshold=0):
+    def __init__(self, s, m1, m2, m3, interclass_filtering_threshold=0):
         super().__init__()
         self.s = s
         self.m1 = m1
@@ -34,7 +29,9 @@ class CombinedMarginLoss(torch.nn.Module):
             with torch.no_grad():
                 dirty = logits > self.interclass_filtering_threshold
                 dirty = dirty.float()
-                mask = torch.ones([index_positive.size(0), logits.size(1)], device=logits.device)
+                mask = torch.ones(
+                    [index_positive.size(0), logits.size(1)], device=logits.device
+                )
                 mask.scatter_(1, labels[index_positive], 0)
                 dirty[index_positive] *= mask
                 tensor_mul = 1 - dirty
@@ -50,7 +47,9 @@ class CombinedMarginLoss(torch.nn.Module):
                 target_logit.arccos_()
                 logits.arccos_()
                 final_target_logit = target_logit + self.m2
-                logits[index_positive, labels[index_positive].view(-1)] = final_target_logit
+                logits[index_positive, labels[index_positive].view(-1)] = (
+                    final_target_logit
+                )
                 logits.cos_()
             logits = logits * self.s
 
@@ -83,6 +82,7 @@ class PartialFC_V2(torch.nn.Module):
     >>>     loss.backward()
     >>>     optimizer.step()
     """
+
     _version = 2
 
     def __init__(
@@ -93,7 +93,7 @@ class PartialFC_V2(torch.nn.Module):
         sample_rate: float = 1.0,
         fp16: bool = False,
         is_normlize: int = 1,
-        sample_num_feat=None
+        sample_num_feat=None,
     ):
         """
         Paramenters:
@@ -129,7 +129,9 @@ class PartialFC_V2(torch.nn.Module):
 
         self.is_updated: bool = True
         self.init_weight_update: bool = True
-        self.weight = torch.nn.Parameter(torch.normal(0, 0.01, (self.num_local, embedding_size)))
+        self.weight = torch.nn.Parameter(
+            torch.normal(0, 0.01, (self.num_local, embedding_size))
+        )
 
         # margin_loss
         if isinstance(margin_loss, Callable):
@@ -139,15 +141,15 @@ class PartialFC_V2(torch.nn.Module):
 
     def sample(self, labels, index_positive):
         """
-            This functions will change the value of labels
-            Parameters:
-            -----------
-            labels: torch.Tensor
-                pass
-            index_positive: torch.Tensor
-                pass
-            optimizer: torch.optim.Optimizer
-                pass
+        This functions will change the value of labels
+        Parameters:
+        -----------
+        labels: torch.Tensor
+            pass
+        index_positive: torch.Tensor
+            pass
+        optimizer: torch.optim.Optimizer
+            pass
         """
         with torch.no_grad():
             positive = torch.unique(labels[index_positive], sorted=True).cuda()
@@ -160,8 +162,7 @@ class PartialFC_V2(torch.nn.Module):
                 index = positive
             self.weight_index = index
 
-            labels[index_positive] = torch.searchsorted(
-                index, labels[index_positive])
+            labels[index_positive] = torch.searchsorted(index, labels[index_positive])
 
         return self.weight[self.weight_index]
 
@@ -188,8 +189,9 @@ class PartialFC_V2(torch.nn.Module):
         batch_size = local_embeddings.size(0)
         if self.last_batch_size == 0:
             self.last_batch_size = batch_size
-        assert self.last_batch_size == batch_size, (
-            f"last batch size do not equal current batch size: {self.last_batch_size} vs {batch_size}")
+        assert (
+            self.last_batch_size == batch_size
+        ), f"last batch size do not equal current batch size: {self.last_batch_size} vs {batch_size}"
 
         _gather_embeddings = [
             torch.zeros((batch_size, self.embedding_size)).cuda()
@@ -218,7 +220,9 @@ class PartialFC_V2(torch.nn.Module):
 
         if self.sample_num_feat is not None and self.sample_num_feat < weight.size(1):
             with torch.no_grad():
-                noise = torch.rand(weight.size(1), device=weight.device)  # noise in [0, 1]
+                noise = torch.rand(
+                    weight.size(1), device=weight.device
+                )  # noise in [0, 1]
                 ids_shuffle = torch.argsort(noise)[: self.sample_num_feat]
             weight = weight.index_select(1, ids_shuffle)
             embeddings = embeddings.index_select(1, ids_shuffle)
@@ -318,11 +322,14 @@ class AllGatherFunc(torch.autograd.Function):
         grad_out = grad_list[rank]
 
         dist_ops = [
-            distributed.reduce(
-                grad_out, rank, distributed.ReduceOp.SUM, async_op=True)
-            if i == rank
-            else distributed.reduce(
-                grad_list[i], i, distributed.ReduceOp.SUM, async_op=True
+            (
+                distributed.reduce(
+                    grad_out, rank, distributed.ReduceOp.SUM, async_op=True
+                )
+                if i == rank
+                else distributed.reduce(
+                    grad_list[i], i, distributed.ReduceOp.SUM, async_op=True
+                )
             )
             for i in range(distributed.get_world_size())
         ]
