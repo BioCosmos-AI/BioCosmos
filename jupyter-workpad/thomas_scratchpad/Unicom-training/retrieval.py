@@ -10,7 +10,9 @@ import numpy as np
 import pandas as pd
 import PIL
 import torch
-import clip
+
+# import clip
+import open_clip
 from torch import distributed, optim
 from torch.nn.functional import normalize
 from torch.utils.data import DataLoader, Dataset
@@ -89,11 +91,22 @@ class Config:
         self.seed = 1024
         self.transform = None
         self.weight_decay = 0
-        self.output_dim = (
-            512
-            if "B/32" in self.model_name
-            else (768 if "B/16" in self.model_name else 1024)
-        )
+        self.use_distributed = False
+
+        # Added cluster_results_path
+        self.cluster_results_path = None
+        # Update output_dim logic for open_clip model names
+        self.output_dim = self._get_output_dim()
+
+    def _get_output_dim(self):
+        # Map common CLIP model names to their output dimensions
+        dim_map = {"ViT-B/32": 512, "ViT-B/16": 768, "ViT-L/14": 1024, "ViT-H-14": 1280}
+        # Try to match the model name to known dimensions
+        for model_key, dim in dim_map.items():
+            if model_key in self.model_name:
+                return dim
+        # Default to 512 if unknown
+        return 512
 
 
 def get_dataset(dataset_name: str, transform: Callable, transform_train=None) -> Dict:
@@ -161,6 +174,9 @@ class WarpModule(torch.nn.Module):
 # Used to load VLM4BIO-based clustered dataset
 class CustomClusteredDataset(Dataset):
     def __init__(self, cluster_results_path, transform=None):
+        if cluster_results_path is None:
+            raise ValueError("cluster_results_path must be specified")
+
         self.df = pd.read_csv(cluster_results_path)
         self.transform = transform
         self.num_classes = self.df["cluster_id"].nunique()
@@ -173,7 +189,8 @@ class CustomClusteredDataset(Dataset):
 
         # Print first few paths to verify
         print("First few image paths:")
-        print(self.df["image_path"].head())
+        for path in self.df["image_path"].head():
+            print(path)
 
     def __len__(self):
         return len(self.df)
@@ -182,7 +199,7 @@ class CustomClusteredDataset(Dataset):
         row = self.df.iloc[idx]
         image_path = row["image_path"]
         cluster_id = row["cluster_id"]
-
+        #         print("Image path: ", image_path)
         try:
             image = PIL.Image.open(image_path)
             if self.transform:
@@ -476,32 +493,35 @@ def main(config=None):
     global args
     args = config
 
+    #     if config.use_distributed:
+    #         os.environ['MASTER_ADDR'] = 'localhost'
+    #         os.environ['MASTER_PORT'] = '12355'
+    #         distributed.init_process_group(backend='nccl', world_size=1, rank=0)
+
     # Initialize distributed processing with a single process
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "12355"
     distributed.init_process_group(backend="nccl", world_size=1, rank=0)
 
-    # Load model and initialize
-    model, transform_clip = clip.load(args.model_name)
-    # Use only the vision encoder part of CLIP
+    # Load model and initialize using open_clip
+    model, _, preprocess = open_clip.create_model_and_transforms(config.model_name)
+    # Use only the vision encoder part
     model = model.visual
-    model = (
-        model.float()
-    )  # Convert to full precision because that's what the rest of the unicom seems to want
+    model = model.float()  # Convert to full precision
 
     model = WarpModule(model)
     model.train()
     model.cuda()
 
-    # Create dataset and loader
+    # Create dataset and loader with specified cluster results path
     dataset_train = CustomClusteredDataset(
-        cluster_results_path="clustering_results.csv", transform=transform_clip
+        cluster_results_path=config.cluster_results_path, transform=preprocess
     )
 
     loader_train = DataLoader(
         dataset_train,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
         pin_memory=True,
         drop_last=True,
         shuffle=True,
@@ -510,21 +530,20 @@ def main(config=None):
     backbone = model
 
     margin_loss = CombinedMarginLoss(
-        args.margin_loss_s,
-        args.margin_loss_m1,
-        args.margin_loss_m2,
-        args.margin_loss_m3,
-        args.margin_loss_filter,
+        config.margin_loss_s,
+        config.margin_loss_m1,
+        config.margin_loss_m2,
+        config.margin_loss_m3,
+        config.margin_loss_filter,
     )
 
     module_partial_fc = PartialFC_V2(
         margin_loss,
-        args.output_dim,
+        config.output_dim,
         dataset_train.num_classes,
-        args.sample_rate,
+        config.sample_rate,
         False,
-        sample_num_feat=args.num_feat,
-        #         use_distributed=False
+        sample_num_feat=config.num_feat,
     )
     module_partial_fc.train().cuda()
 
@@ -533,33 +552,36 @@ def main(config=None):
             {"params": backbone.parameters()},
             {
                 "params": module_partial_fc.parameters(),
-                "lr": args.lr * args.lr_pfc_weight,
+                "lr": config.lr * config.lr_pfc_weight,
             },
         ],
-        lr=args.lr,
-        weight_decay=args.weight_decay,
+        lr=config.lr,
+        weight_decay=config.weight_decay,
     )
 
-    steps_per_epoch = len(dataset_train) // args.batch_size + 1
+    steps_per_epoch = len(dataset_train) // config.batch_size + 1
     lr_scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer=opt,
-        max_lr=[args.lr, args.lr * args.lr_pfc_weight],
+        max_lr=[config.lr, config.lr * config.lr_pfc_weight],
         steps_per_epoch=steps_per_epoch,
-        epochs=args.epochs,
+        epochs=config.epochs,
         pct_start=0.1,
     )
 
-    callback_func = SpeedCallBack(10, args.epochs * steps_per_epoch, args.batch_size)
+    callback_func = SpeedCallBack(
+        10, config.epochs * steps_per_epoch, config.batch_size
+    )
     auto_scaler = torch.cuda.amp.grad_scaler.GradScaler(growth_interval=200)
     global_step = 0
 
-    save_dir = "checkpoints"
-    os.makedirs(save_dir, exist_ok=True)
+    # Use config.save_dir instead of hardcoded value
+    os.makedirs(config.save_dir, exist_ok=True)
 
     best_loss = float("inf")
 
     # Create directory for logs if it doesn't exist
-    log_dir = "logs"
+    # Put logs in a subdirectory of save_dir
+    log_dir = os.path.join(config.save_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
 
     # Create a log file with timestamp
@@ -572,8 +594,8 @@ def main(config=None):
             "epoch,batch,global_step,loss,learning_rate_backbone,learning_rate_pfc\n"
         )
 
-    # Main training loop - removed train_sampler check
-    for epoch in range(args.epochs):
+    # Main training loop
+    for epoch in range(config.epochs):
         running_loss = 0.0
         batch_losses = []
 
@@ -602,7 +624,7 @@ def main(config=None):
                     f"{epoch},{batch_idx},{global_step},{current_loss},{lr_backbone},{lr_pfc}\n"
                 )
 
-            if global_step % args.gradient_acc == 0:
+            if global_step % config.gradient_acc == 0:
                 auto_scaler.step(opt)
                 auto_scaler.update()
                 opt.zero_grad()
@@ -623,12 +645,13 @@ def main(config=None):
             "model_state_dict": backbone.state_dict(),
             "optimizer_state_dict": opt.state_dict(),
             "loss": epoch_loss,
-            "config": args,
+            "config": config,
         }
-        torch.save(checkpoint, f"{save_dir}/latest_checkpoint.pt")
+        # Use config.save_dir for checkpoint paths
+        torch.save(checkpoint, os.path.join(config.save_dir, "latest_checkpoint.pt"))
         if epoch_loss < best_loss:
             best_loss = epoch_loss
-            torch.save(checkpoint, f"{save_dir}/best_checkpoint.pt")
+            torch.save(checkpoint, os.path.join(config.save_dir, "best_checkpoint.pt"))
 
         print(f"Epoch {epoch}")
         print(f"Average loss: {epoch_loss:.4f}")

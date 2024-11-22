@@ -1,12 +1,14 @@
 import os
 import torch
-import clip
+import open_clip
 import pandas as pd
 from PIL import Image
 from pathlib import Path
 import numpy as np
 from scipy.io import savemat
 from torch.utils.data import Dataset, DataLoader
+
+MODEL_NAME = "ViT-H-14-378-quickgelu"
 
 
 class VLM4BioDataset(Dataset):
@@ -18,17 +20,43 @@ class VLM4BioDataset(Dataset):
         self.base_path = Path(base_path)
         self.preprocess = preprocess
 
+        # Check for missing images and report/filter
+        print("Checking for missing images...")
+        missing_images = []
+        for idx, row in self.df.iterrows():
+            img_path = self.base_path / row["image_path"]
+            if not img_path.exists():
+                missing_images.append((idx, str(img_path)))
+
+        if missing_images:
+            print(f"Found {len(missing_images)} missing images")
+            print("First few missing images:")
+            for idx, path in missing_images[:5]:
+                print(f"Row {idx}: {path}")
+
+            # Filter out rows with missing images
+            valid_indices = [
+                idx
+                for idx, row in self.df.iterrows()
+                if (self.base_path / row["image_path"]).exists()
+            ]
+            self.df = self.df.loc[valid_indices]
+            print(f"Filtered dataset from {len(df)} to {len(self.df)} rows")
+        else:
+            print("All images found successfully!")
+
     def __len__(self):
         return len(self.df)
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        img_path = self.base_path / row["image_path"]
+        # Convert to absolute path
+        img_path = Path(self.base_path / row["image_path"]).resolve()
 
         try:
             image = self.preprocess(Image.open(img_path))
-            text = clip.tokenize([row["caption"]])[0]
-
+            text = self.tokenizer([row["caption"]])[0]
+            #             print("Image Path", str(img_path))
             return {
                 "image": image,
                 "text": text,
@@ -45,8 +73,14 @@ def process_and_save_embeddings(
     csv_path, base_path, batch_size=32, save_every=1000, cohort="train"
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, preprocess = clip.load("ViT-B/32", device=device)
+    model, _, preprocess = open_clip.create_model_and_transforms(MODEL_NAME)
+    tokenizer = open_clip.get_tokenizer(MODEL_NAME)
+
+    model = model.to(device)
     model.eval()
+
+    # Add tokenizer to dataset class
+    VLM4BioDataset.tokenizer = tokenizer
 
     dataset = VLM4BioDataset(csv_path, base_path, preprocess, cohort)
     dataloader = DataLoader(
@@ -59,7 +93,8 @@ def process_and_save_embeddings(
     batch_count = 0
     file_count = 0
 
-    os.makedirs(f"embeddings_{cohort}", exist_ok=True)
+    save_dir = f"embeddings_{cohort}_{MODEL_NAME}"
+    os.makedirs(save_dir, exist_ok=True)
 
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
@@ -90,7 +125,12 @@ def process_and_save_embeddings(
 
             if batch_count * batch_size >= save_every:
                 save_batch_to_mat(
-                    image_embeddings, text_embeddings, metadata, file_count, cohort
+                    image_embeddings,
+                    text_embeddings,
+                    metadata,
+                    file_count,
+                    cohort,
+                    MODEL_NAME,
                 )
 
                 image_embeddings = []
@@ -102,11 +142,18 @@ def process_and_save_embeddings(
         # Save any remaining
         if image_embeddings:
             save_batch_to_mat(
-                image_embeddings, text_embeddings, metadata, file_count, cohort
+                image_embeddings,
+                text_embeddings,
+                metadata,
+                file_count,
+                cohort,
+                MODEL_NAME,
             )
 
 
-def save_batch_to_mat(image_embeddings, text_embeddings, metadata, file_count, cohort):
+def save_batch_to_mat(
+    image_embeddings, text_embeddings, metadata, file_count, cohort, model_name
+):
     save_dict = {
         "image_embeddings": np.array(image_embeddings).astype("float32"),
         "text_embeddings": np.array(text_embeddings).astype("float32"),
@@ -115,7 +162,8 @@ def save_batch_to_mat(image_embeddings, text_embeddings, metadata, file_count, c
         "categories": [m["category"] for m in metadata],
     }
 
-    savemat(f"./embeddings_{cohort}/embeddings_batch_{file_count}.mat", save_dict)
+    save_dir = f"./embeddings_{cohort}_{model_name}"
+    savemat(f"{save_dir}/embeddings_batch_{file_count}.mat", save_dict)
     print(f"Saved batch {file_count}")
 
 
