@@ -19,16 +19,18 @@ import argparse
 import logging
 
 
-# [Previous setup_logging and setup_distributed functions remain the same]
 def setup_logging(rank):
+    log_file = f"clustering_rank_{rank}.log"
+
     logging.basicConfig(
         level=logging.INFO,
         format=f"[Rank {rank}] %(asctime)s - %(levelname)s - %(message)s",
         handlers=[
-            logging.FileHandler(f"clustering_rank_{rank}.log"),
+            logging.FileHandler(log_file),
             logging.StreamHandler(),
         ],
     )
+    logging.info(f"Logging initialized for rank {rank}. Log file: {log_file}")
 
 
 def setup_distributed():
@@ -36,21 +38,31 @@ def setup_distributed():
     world_size = int(os.environ["SLURM_NTASKS"])
     local_rank = int(os.environ["SLURM_LOCALID"])
 
-    # master_addr = os.environ["SLURM_SUBMIT_HOST"] # Don't use SUBMIT HOST, it's the login node at UFL HiPerGator
-    # Get the first node in the allocation for the master address
-    master_addr = os.environ["SLURM_NODELIST"].split(",")[0].split("[")[0]
+    # Get the hostname of the first node
+    nodes = os.environ["SLURM_NODELIST"]
+    if "[" in nodes:
+        # Handle node ranges like "c0800a-s[11,17,23]"
+        prefix = nodes.split("[")[0]
+        node_nums = nodes.split("[")[1].split("]")[0].split(",")
+        master_addr = f"{prefix}{node_nums[0]}"
+    else:
+        # Handle single node or comma-separated list
+        master_addr = nodes.split(",")[0]
+
     master_port = int(os.environ.get("MASTER_PORT", "12355"))
 
+    logging.info(f"Using master node: {master_addr}")
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = str(master_port)
 
+    # Add some debugging info
+    logging.info(f"SLURM_NODELIST: {os.environ['SLURM_NODELIST']}")
+    logging.info(f"SLURM_PROCID: {rank}")
+    logging.info(f"MASTER_ADDR: {master_addr}")
+    logging.info(f"MASTER_PORT: {master_port}")
+
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(local_rank)
-
-    setup_logging(rank)
-    logging.info(
-        f"Initialized distributed process: rank {rank}/{world_size} on {master_addr}"
-    )
 
     return rank, world_size, local_rank
 
@@ -58,64 +70,66 @@ def setup_distributed():
 def perform_local_clustering(embeddings, d, local_rank, target_centroids=1000000):
     """
     Perform local clustering on each GPU to produce target_centroids centroids.
-
-    Args:
-        embeddings (np.ndarray): The input embeddings to cluster.
-        d (int): The dimensionality of the embeddings.
-        local_rank (int): The rank of the local GPU.
-        target_centroids (int, optional): The number of centroids to generate. Defaults to 1000000.
-
-    Returns:
-        np.ndarray: The centroids generated from the local clustering.
     """
     logging.info(
-        f"Performing local clustering to generate {target_centroids} centroids"
+        f"Starting local clustering on rank {local_rank} for {len(embeddings)} embeddings"
     )
+    try:
+        kmeans = faiss.Kmeans(
+            d,  # dimension
+            target_centroids,  # number of centroids
+            niter=20,  # number of iterations
+            verbose=True,  # verbose output
+            gpu=True,  # use GPU
+            nredo=1,  # number of clustering runs to perform
+            spherical=False,  # do not normalize centroids
+        )
 
-    res = faiss.StandardGpuResources()
-    cfg = faiss.GpuIndexFlatConfig()
-    cfg.device = local_rank
+        kmeans.train(embeddings)
 
-    kmeans = faiss.GpuKmeans(d, target_centroids, cfg, res)
-    kmeans.train(embeddings)
+        logging.info(f"Completed local clustering with {target_centroids} centroids")
+        return kmeans.centroids
 
-    return kmeans.centroids
+    except Exception as e:
+        logging.error(f"Error in local clustering: {e}")
+        raise
 
 
 def perform_final_clustering(all_centroids, d, local_rank, final_centroids=1000000):
     """
     Perform final clustering on the combined centroids from all GPUs.
-
-    Args:
-        all_centroids (np.ndarray): The combined centroids from all GPUs.
-        d (int): The dimensionality of the centroids.
-        local_rank (int): The rank of the local GPU.
-        final_centroids (int, optional): The number of final centroids to generate. Defaults to 1000000.
-
-    Returns:
-        np.ndarray: The final centroids after clustering.
     """
-    logging.info(
-        f"Performing final clustering to reduce to {final_centroids} centroids"
-    )
+    logging.info(f"Starting final clustering to reduce to {final_centroids} centroids")
+    try:
+        kmeans = faiss.Kmeans(
+            d,  # dimension
+            final_centroids,  # number of centroids
+            niter=20,  # number of iterations
+            verbose=True,  # verbose output
+            gpu=True,  # use GPU
+            nredo=1,  # number of clustering runs to perform
+            spherical=False,  # do not normalize centroids
+        )
 
-    res = faiss.StandardGpuResources()
-    cfg = faiss.GpuIndexFlatConfig()
-    cfg.device = local_rank
+        kmeans.train(all_centroids)
 
-    final_kmeans = faiss.GpuKmeans(d, final_centroids, cfg, res)
-    final_kmeans.train(all_centroids)
+        logging.info("Completed final clustering")
+        return kmeans.centroids
 
-    return final_kmeans.centroids
+    except Exception as e:
+        logging.error(f"Error in final clustering: {e}")
+        raise
 
 
 def main(args):
     """
     Main function to execute the clustering process.
-
-    Args:
-        args (Namespace): The command line arguments parsed from the input.
     """
+    # Set up logging first
+    rank = int(os.environ["SLURM_PROCID"])
+    setup_logging(rank)
+
+    # Then set up distributed
     rank, world_size, local_rank = setup_distributed()
 
     try:
@@ -135,11 +149,14 @@ def main(args):
             logging.info(f"Processing directory: {node_rank_dir}")
             mat_files = sorted(list(node_rank_dir.glob("batch_*.mat")))
 
-            for mat_file in mat_files:
+            for i, mat_file in enumerate(mat_files):
+                if i % 10 == 0:  # Log every 10 batches
+                    logging.info(f"Loading batch {i}/{len(mat_files)}")
+
                 data = loadmat(mat_file)
                 image_emb = data["image_embeddings"]
                 text_emb = data["text_embeddings"]
-                joint_emb = (image_emb + text_emb) / 2
+                joint_emb = (image_emb + text_emb) / 2  # Or CONCATENATION
                 all_embeddings.extend(joint_emb)
 
                 metadata.extend(
@@ -157,22 +174,35 @@ def main(args):
         d = embeddings.shape[1]
         logging.info(f"Loaded {len(embeddings)} embeddings")
 
-        # First stage: Each GPU creates 1M centroids (like UNICOM)
+        # First stage: Each GPU creates local centroids
         local_centroids = perform_local_clustering(
             embeddings, d, local_rank, target_centroids=args.local_centroids
         )
 
+        # Clean up embeddings
+        del embeddings
+        torch.cuda.empty_cache()
+
         # Gather all centroids on rank 0
+        local_centroids_tensor = torch.from_numpy(local_centroids).to(
+            local_rank
+        )  # Move to GPU
         gathered_centroids = [
-            torch.zeros_like(torch.from_numpy(local_centroids))
+            torch.zeros_like(local_centroids_tensor, device=local_rank)  # Create on GPU
             for _ in range(world_size)
         ]
-        dist.all_gather(gathered_centroids, torch.from_numpy(local_centroids))
+        dist.all_gather(gathered_centroids, local_centroids_tensor)
 
         if rank == 0:
             # Combine all local centroids
-            all_centroids = np.concatenate([c.numpy() for c in gathered_centroids])
+            all_centroids = np.concatenate(
+                [c.cpu().numpy() for c in gathered_centroids]
+            )  # Move back to CPU for numpy
             logging.info(f"Combined {len(all_centroids)} centroids from all GPUs")
+
+            # Clean up gathered centroids
+            del gathered_centroids
+            torch.cuda.empty_cache()
 
             # Second stage: Cluster down to final number of centroids
             final_centroids = perform_final_clustering(
