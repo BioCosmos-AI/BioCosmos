@@ -25,10 +25,10 @@ def get_model(model_name='ViT-H-14-378-quickgelu'):
     )
     return model, preprocess
 
-def get_image_embedding_clip(img, model):
+def get_image_embedding_clip(img, model, preprocess):
     """Generate embeddings for an image using the provided CLIP model."""
     try:
-        img.to(device)
+        img = preprocess(img).unsqueeze(0).to(device)
         with torch.no_grad():
             image_embedding = model.encode_image(img)
         return image_embedding.cpu().numpy()
@@ -38,7 +38,7 @@ def get_image_embedding_clip(img, model):
 
 def get_split_files(split):
     """Get all the embeddings parquet file names within a specific split"""
-    tol_emb_path = '/blue/arthur.porto-biocosmos/data/datasets/TreeOfLife-10M/dataset/evobio10m-CVPR-2024/224x224/{split}/embeddings'
+    tol_emb_path = f'/blue/arthur.porto-biocosmos/data/datasets/TreeOfLife-10M/dataset/evobio10m-CVPR-2024/224x224/{split}/embeddings/*'
     emb_parquets = glob.glob(tol_emb_path)
     emb_tups = []
     for ep in emb_parquets:
@@ -66,7 +66,7 @@ def extract_image_from_wds(shard_path, uuid_key):
 
 def compare_random_img_to_embedding(model, preprocess, emb_split, split_row, split):
     emb_num = emb_split[0]
-    tol_path = '/blue/arthur.porto-biocosmos/data/datasets/TreeOfLife-10M/dataset/evobio10m-CVPR-2024/224x224/{split}'
+    tol_path = f'/blue/arthur.porto-biocosmos/data/datasets/TreeOfLife-10M/dataset/evobio10m-CVPR-2024/224x224/{split}'
     shard_file = f'shard-{emb_num}.tar'
     shard_path = os.path.join(tol_path, shard_file)
 
@@ -75,18 +75,17 @@ def compare_random_img_to_embedding(model, preprocess, emb_split, split_row, spl
     parquet_embedding = torch.tensor(split_row.iloc[0].values, dtype=torch.float32)
 
     target_img = extract_image_from_wds(shard_path, key)
-    img = preprocess(target_img)
-    img_embedding = get_image_embedding_clip(img, model)
+    img_embedding = get_image_embedding_clip(target_img, model)
 
-    cosine_similarity = F.cosine_similarity(parquet_embedding.unsqueeze(0), img_embedding.unsqueeze(0))
+    cosine_similarity = F.cosine_similarity(parquet_embedding.unsqueeze(0), torch.tensor(img_embedding))
 
-    return key, cosine_similarity
+    return key, cosine_similarity.item()
 
 
 def main():
     # args formatting check
     if len(sys.argv) != 2:
-        logger.error("Usage: python process_embeddings.py <split>")
+        logger.error("Usage: python validate_embeddings.py <split>")
         sys.exit(1)
 
     split = sys.argv[1]
@@ -99,10 +98,11 @@ def main():
     model_name = "ViT-H-14-378-quickgelu"
     model, preprocess = get_model(model_name)
 
+    logger.info("getting split file names")
     emb_splits = get_split_files(split) # get the split num + path to split
 
     results = []
-    for emb_split in emb_splits[:1]:
+    for emb_split in emb_splits:
         logger.info(f"commencing with split file: {emb_split}")
         split_row = get_random_split_row(emb_split)
         logger.info(f"obtained a sample row, now comparing the img to its embedding")
