@@ -24,7 +24,7 @@ TABLE_NAME="image_embeddings"
 TAR_DIR="/blue/arthur.porto-biocosmos/data/datasets/TreeOfLife-10M/dataset/evobio10m-CVPR-2024/224x224/train"
 
 # Run the script
-python /home/tdeatherage3.gatech/add_species_names.py \
+python /home/tdeatherage3.gatech/unicom/embedding_and_clustering/add_species_names.py \
     --db-path "$DB_PATH" \
     --table-name "$TABLE_NAME" \
     --tar-dir "$TAR_DIR"
