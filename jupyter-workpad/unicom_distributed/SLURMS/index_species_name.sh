@@ -3,7 +3,7 @@
 #SBATCH --ntasks=1              # Run on a single CPU
 #SBATCH --mem=32gb             # Job memory request
 #SBATCH --time=4:00:00         # Time limit hrs:min:sec
-#SBATCH --output=add_index_%j.log   # Standard output and error log
+#SBATCH --output=index_species_name_%j.log   # Standard output and error log
 #SBATCH --mail-type=END,FAIL        # Mail events
 
 # Load conda module
