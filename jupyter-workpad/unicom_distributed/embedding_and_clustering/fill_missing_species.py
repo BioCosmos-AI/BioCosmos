@@ -70,7 +70,7 @@ def update_missing_species(conn, table_name, logger):
     """Update missing species names using common names."""
     # Get records with missing species names
     cursor = conn.execute(
-        f"SELECT uuid, shard_id, common_name FROM {table_name} WHERE species_name IS NULL AND common_name IS NOT NULL"
+        f"SELECT uuid, shard_id, common_name FROM {table_name} WHERE species_name IS NULL"
     )
     rows = cursor.fetchall()
 
