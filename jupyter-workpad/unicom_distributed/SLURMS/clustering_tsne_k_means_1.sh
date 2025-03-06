@@ -8,7 +8,9 @@
 #SBATCH --mem=128gb                 # Memory per node
 #SBATCH --time=48:00:00             # Maximum runtime
 #SBATCH --output=dist_cluster_%j.log
-#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-type=END,FAIL,TIME_LIMIT_50,TIME_LIMIT_80,TIME_LIMIT_90
+#SBATCH --requeue                   # Allow the job to be requeued
+#SBATCH --open-mode=append          # Append to output files if restarted
 
 # Print job information
 echo "Job started at $(date)"
@@ -29,17 +31,33 @@ CONDA_ENV_PATH=/blue/arthur.porto-biocosmos/tdeatherage3.gatech/conda/envs/unico
 # Activate conda environment
 conda activate ${CONDA_ENV_PATH}
 
+# Get the first node to use as master
+MASTER_NODE=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
+echo "Using master node: $MASTER_NODE"
+export MASTER_ADDR=$MASTER_NODE
+
+# Force IPv4 and set network parameters
+export NCCL_SOCKET_IFNAME=eth0
+export GLOO_SOCKET_IFNAME=eth0
+export NCCL_IB_DISABLE=1
+export NCCL_DEBUG=INFO
+export NCCL_IP_VERSION=4
+
 # Set variables
 DB_PATH="/blue/arthur.porto-biocosmos/tdeatherage3.gatech/embeddings/image_embeddings.sqlite"
-TABLE_NAME="image_embeddings"
+TABLE_NAME="image_embeddings" 
 COLUMN_NAME="porto_suggested_cluster_exp_1"
-LOG_DIR="/home/tdeatherage3.gatech/logs"
+LOG_DIR="/home/tdeatherage3.gatech/logs/clustering_job_${SLURM_JOB_ID}"
 MIN_SAMPLES=25
 MIN_K=2
 MAX_K=10
 TSNE_DIMS=2
 OUTLIER_THRESHOLD=2.0
-STATS_OUTPUT="clustering_tsne_k_means_1_$(date +%Y%m%d).json"
+STATS_OUTPUT="clustering_stats_${SLURM_JOB_ID}.json"
+
+# Create log directory if it doesn't exist
+mkdir -p ${LOG_DIR}
+mkdir -p ${LOG_DIR}/checkpoints
 
 # Set CUDA visible devices to match local GPU index
 export CUDA_VISIBLE_DEVICES=0
@@ -51,6 +69,20 @@ export MASTER_PORT=12355
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+# Check if this is a restarted job by looking for checkpoint files
+CHECKPOINT_EXISTS=0
+if [ -d "${LOG_DIR}/checkpoints" ] && [ "$(ls -A ${LOG_DIR}/checkpoints)" ]; then
+    echo "Checkpoint files found. This appears to be a restarted job."
+    CHECKPOINT_EXISTS=1
+fi
+
+# Add resume flag if checkpoints exist
+RESUME_FLAG=""
+if [ "$CHECKPOINT_EXISTS" -eq 1 ]; then
+    RESUME_FLAG="--resume"
+    echo "Will attempt to resume from checkpoint"
+fi
 
 # Run the distributed clustering script using srun
 srun python /home/tdeatherage3.gatech/unicom/embedding_and_clustering/clustering_tsne_k_means_1.py \
@@ -64,6 +96,13 @@ srun python /home/tdeatherage3.gatech/unicom/embedding_and_clustering/clustering
     --tsne-dims "$TSNE_DIMS" \
     --outlier-threshold "$OUTLIER_THRESHOLD" \
     --stats-output "$STATS_OUTPUT" \
-    --use-gpu
+    --use-gpu \
+    $RESUME_FLAG
+
+RETURN_CODE=$?
+if [ $RETURN_CODE -ne 0 ]; then
+    echo "Job failed with return code $RETURN_CODE at $(date)"
+    exit $RETURN_CODE
+fi
 
 echo "Job completed at $(date)"
