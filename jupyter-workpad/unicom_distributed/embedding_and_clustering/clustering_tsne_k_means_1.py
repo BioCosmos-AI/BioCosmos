@@ -140,7 +140,7 @@ def load_checkpoint(rank, checkpoint_dir, logger):
 
 
 def setup_distributed(output_dir):
-    """Set up distributed training environment."""
+    """Set up distributed training environment using GLOO backend for better compatibility."""
     # Set up basic logging first
     logging.basicConfig(
         level=logging.INFO,
@@ -173,22 +173,24 @@ def setup_distributed(output_dir):
     logging.info(f"MASTER_ADDR: {master_addr}")
     logging.info(f"MASTER_PORT: {master_port}")
 
-    # Initialize process group
+    # Initialize process group - explicitly use GLOO backend for better compatibility
     try:
-        dist.init_process_group("nccl", rank=rank, world_size=world_size)
-        logging.info("Successfully initialized process group with NCCL backend")
+        # Use a longer timeout for initialization
+        timeout = datetime.timedelta(minutes=30)
+        dist.init_process_group(
+            "gloo", rank=rank, world_size=world_size, timeout=timeout
+        )
+        logging.info("Successfully initialized process group with GLOO backend")
     except Exception as e:
-        logging.error(f"Failed to initialize with NCCL: {e}")
-        logging.info("Trying with GLOO backend instead...")
-        try:
-            # If NCCL fails, try GLOO
-            dist.init_process_group("gloo", rank=rank, world_size=world_size)
-            logging.info("Successfully initialized process group with GLOO backend")
-        except Exception as e2:
-            logging.error(f"Failed to initialize with GLOO: {e2}")
-            raise
+        logging.error(f"Failed to initialize with GLOO: {e}")
+        raise
 
-    torch.cuda.set_device(local_rank)
+    # Set device for operations that need a GPU
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        logging.info(f"Set CUDA device to local_rank {local_rank}")
+    else:
+        logging.warning("CUDA not available, using CPU only")
 
     # Now set up proper logging to file
     logger = setup_logging(rank, output_dir)
@@ -200,216 +202,439 @@ def setup_distributed(output_dir):
     return rank, world_size, local_rank, logger
 
 
-def load_data_from_sqlite(db_path, table_name, rank, world_size, logger):
-    """Load data from SQLite into a DataFrame, distributed by species alphabet ranges."""
-    logger.info(f"Loading data from {db_path}")
+# def setup_distributed(output_dir):
+#     """Set up distributed training environment."""
+#     # Set up basic logging first
+#     logging.basicConfig(
+#         level=logging.INFO,
+#         format="%(asctime)s - %(levelname)s - %(message)s",
+#         handlers=[logging.StreamHandler()],
+#     )
 
-    # Set initial retry parameters
-    max_retries = 5
-    retry_delay = 5  # seconds
+#     # Get distributed parameters
+#     rank = int(os.environ["SLURM_PROCID"])
+#     world_size = int(os.environ["SLURM_NTASKS"])
+#     local_rank = int(os.environ["SLURM_LOCALID"])
 
-    for attempt in range(max_retries):
+#     # Get master address from environment variable (set in the SLURM script)
+#     master_addr = os.environ.get("MASTER_ADDR")
+#     if not master_addr:
+#         # Fallback if not set in environment
+#         import socket
+
+#         master_addr = socket.gethostname()
+
+#     master_port = int(os.environ.get("MASTER_PORT", "12355"))
+
+#     logging.info(f"Using master node: {master_addr}")
+#     os.environ["MASTER_ADDR"] = master_addr
+#     os.environ["MASTER_PORT"] = str(master_port)
+
+#     # Add some debugging info
+#     logging.info(f"SLURM_NODELIST: {os.environ['SLURM_NODELIST']}")
+#     logging.info(f"SLURM_PROCID: {rank}")
+#     logging.info(f"MASTER_ADDR: {master_addr}")
+#     logging.info(f"MASTER_PORT: {master_port}")
+
+#     # Initialize process group
+#     try:
+#         dist.init_process_group("nccl", rank=rank, world_size=world_size)
+#         logging.info("Successfully initialized process group with NCCL backend")
+#     except Exception as e:
+#         logging.error(f"Failed to initialize with NCCL: {e}")
+#         logging.info("Trying with GLOO backend instead...")
+#         try:
+#             # If NCCL fails, try GLOO
+#             dist.init_process_group("gloo", rank=rank, world_size=world_size)
+#             logging.info("Successfully initialized process group with GLOO backend")
+#         except Exception as e2:
+#             logging.error(f"Failed to initialize with GLOO: {e2}")
+#             raise
+
+#     torch.cuda.set_device(local_rank)
+
+#     # Now set up proper logging to file
+#     logger = setup_logging(rank, output_dir)
+
+#     logger.info(
+#         f"Initialized distributed process: rank {rank}/{world_size} on {master_addr}"
+#     )
+
+#     return rank, world_size, local_rank, logger
+
+
+def load_and_distribute_data(db_path, table_name, rank, world_size, logger):
+    """Rank 0 loads entire data and distributes to other ranks using GLOO backend."""
+
+    # Create a GLOO process group for reliable data sharing
+    try:
+        # Initialize a separate GLOO process group for data distribution
+        gloo_group = dist.new_group(ranks=list(range(world_size)), backend="gloo")
+        logger.info(f"Created GLOO process group for data distribution")
+    except Exception as e:
+        logger.error(f"Error creating GLOO group: {str(e)}")
+        # Continue with default process group
+        gloo_group = None
+        logger.info("Will use default process group for communication")
+
+    if rank == 0:
+        logger.info(f"Rank 0: Loading entire table from {db_path} into memory")
+
         try:
-            # Add delay between ranks to reduce contention
-            time.sleep(rank * 2)  # Stagger access based on rank
+            # Only rank 0 accesses the database
+            connection = sqlite3.connect(db_path, timeout=300.0)
 
-            # Connect with longer timeout and exclusive access
-            conn = sqlite3.connect(db_path, timeout=120.0, isolation_level="EXCLUSIVE")
-            logger.info(f"Successfully connected to database (attempt {attempt+1})")
+            # Use a simple query to get all data
+            query = f"SELECT uuid, species_name, embedding FROM {table_name}"
+            logger.info("Executing simple SELECT query")
 
-            # Set pragmas for better performance - with retry logic
-            try:
-                conn.execute("PRAGMA synchronous = NORMAL")
-                conn.execute("PRAGMA cache_size = -2000000")  # 2GB cache
-                conn.execute("PRAGMA temp_store = MEMORY")
-                conn.execute("PRAGMA journal_mode = WAL")  # Write-Ahead Logging
-                conn.execute("PRAGMA busy_timeout = 60000")  # 60 second busy timeout
-                conn.commit()
-                logger.info("Database PRAGMA settings applied successfully")
-            except sqlite3.OperationalError as pragma_err:
-                logger.warning(f"Could not set all PRAGMA settings: {pragma_err}")
-                # Continue anyway - these are optimizations, not critical
+            # Read in chunks to manage memory
+            chunk_size = 100000
+            chunks = []
 
-            # First, get distinct species and their counts
-            cursor = conn.cursor()
-
-            # Use a more robust query with timeout handling
-            try:
-                logger.info("Executing species count query...")
-                cursor.execute(
-                    f"""
-                    SELECT species_name, COUNT(*) as count 
-                    FROM {table_name}
-                    WHERE species_name IS NOT NULL AND species_name != '' 
-                    GROUP BY species_name
-                    ORDER BY species_name
-                    """
+            for chunk_df in pd.read_sql_query(query, connection, chunksize=chunk_size):
+                # Filter for non-null species names in pandas
+                chunk_df = chunk_df[
+                    chunk_df["species_name"].notna() & (chunk_df["species_name"] != "")
+                ]
+                chunks.append(chunk_df)
+                logger.info(
+                    f"Loaded chunk with {len(chunk_df)} rows, total so far: {sum(len(df) for df in chunks)}"
                 )
-                all_species = cursor.fetchall()
-                logger.info(f"Found {len(all_species)} total species")
 
-                if len(all_species) == 0:
-                    logger.warning("No species found in database, check query")
-                    conn.close()
-                    return pd.DataFrame(), {}, []
+            # Combine all chunks
+            raw_df = pd.concat(chunks, ignore_index=True)
+            connection.close()
 
-            except sqlite3.OperationalError as query_err:
-                logger.error(f"Error executing species query: {query_err}")
-                conn.close()
-                if attempt < max_retries - 1:
-                    wait_time = retry_delay * (attempt + 1)
-                    logger.info(f"Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    return pd.DataFrame(), {}, []
+            logger.info(f"Successfully loaded {len(raw_df)} total rows")
 
-            # Distribute species across ranks alphabetically
-            # This helps balance load while keeping related species together
-            species_per_rank = max(1, len(all_species) // world_size)
-            start_idx = rank * species_per_rank
-            end_idx = (
-                (rank + 1) * species_per_rank
-                if rank < world_size - 1
-                else len(all_species)
-            )
+            # Get unique species and sort them
+            all_species = sorted(raw_df["species_name"].unique())
+            logger.info(f"Found {len(all_species)} unique species")
 
-            my_species = all_species[start_idx:end_idx]
-            species_names = [s[0] for s in my_species]
+            # Create embeddings dictionary
+            embeddings_dict = {}
+            for i, row in tqdm(
+                raw_df.iterrows(), total=len(raw_df), desc="Processing embeddings"
+            ):
+                try:
+                    embedding = np.frombuffer(row["embedding"], dtype=np.float32)
+                    embeddings_dict[row["uuid"]] = embedding
+                except Exception as e:
+                    logger.warning(
+                        f"Error with embedding for UUID {row['uuid']}: {str(e)}"
+                    )
+                    embeddings_dict[row["uuid"]] = np.zeros(1024, dtype=np.float32)
 
-            logger.info(
-                f"Rank {rank} will process {len(species_names)} species (from index {start_idx} to {end_idx-1})"
-            )
+            # Distribute species among ranks
+            species_chunks = np.array_split(all_species, world_size)
 
-            # Handle the case where we have too many species for a single query
-            # SQLite has a limit on the number of parameters (~999)
-            max_params_per_query = 900
+            # Prepare data for each rank
+            rank_data = []
+            for r in range(world_size):
+                r_species = species_chunks[r].tolist()
+                r_df = raw_df[raw_df["species_name"].isin(r_species)].copy()
+                r_uuids = r_df["uuid"].tolist()
+                r_embeddings = {
+                    uuid: embeddings_dict[uuid]
+                    for uuid in r_uuids
+                    if uuid in embeddings_dict
+                }
 
-            # Initialize lists to store data
-            uuids = []
-            species_names_list = []
-            embeddings = []
-            row_count = 0
-
-            # Process species in batches to avoid parameter limit
-            for i in range(0, len(species_names), max_params_per_query):
-                species_batch = species_names[i : i + max_params_per_query]
-                placeholders = ",".join(["?"] * len(species_batch))
-                query = f"""
-                SELECT uuid, species_name, embedding 
-                FROM {table_name}
-                WHERE species_name IN ({placeholders})
-                """
+                rank_data.append(
+                    {
+                        "df": r_df,
+                        "embeddings_dict": r_embeddings,
+                        "species_list": r_species,
+                    }
+                )
 
                 logger.info(
-                    f"Executing query for species batch {i//max_params_per_query + 1} of {(len(species_names) + max_params_per_query - 1) // max_params_per_query}..."
+                    f"Prepared data for rank {r}: {len(r_species)} species, {len(r_df)} samples"
                 )
 
-                try:
-                    cursor.execute(query, species_batch)
-                except sqlite3.OperationalError as batch_err:
-                    logger.error(f"Error executing batch query: {batch_err}")
-                    # Skip this batch and continue with the next one
-                    logger.warning(f"Skipping batch {i//max_params_per_query + 1}")
-                    continue
+            # Free up memory
+            del raw_df
+            del embeddings_dict
 
-                # Fetch data in chunks to manage memory
-                chunk_size = 10000
-
-                logger.info("Fetching data in chunks...")
-                while True:
-                    try:
-                        rows = cursor.fetchmany(chunk_size)
-                        if not rows:
-                            break
-
-                        for uuid, species_name, embedding_blob in rows:
-                            uuids.append(uuid)
-                            species_names_list.append(species_name)
-
-                            try:
-                                # Convert BLOB to numpy array
-                                embedding = np.frombuffer(
-                                    embedding_blob, dtype=np.float32
-                                )
-                                embeddings.append(embedding)
-                            except Exception as embed_err:
-                                logger.warning(
-                                    f"Error with embedding for UUID {uuid}: {str(embed_err)}"
-                                )
-                                # Add empty embedding as placeholder
-                                embeddings.append(
-                                    np.zeros(1024, dtype=np.float32)
-                                )  # Assuming 1024-dim embeddings
-
-                        row_count += len(rows)
-                        if row_count % 100000 == 0:
-                            logger.info(f"Loaded {row_count} rows so far...")
-                    except sqlite3.OperationalError as fetch_err:
-                        logger.error(f"Error fetching chunk: {fetch_err}")
-                        break
-
-            conn.close()
-            logger.info("Database connection closed successfully")
-
-            if len(uuids) == 0:
-                logger.error(f"No data loaded for the assigned species!")
-                if attempt < max_retries - 1:
-                    wait_time = retry_delay * (attempt + 1)
-                    logger.info(f"Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    return pd.DataFrame(), {}, species_names
-
-            # Create DataFrame
-            df = pd.DataFrame({"uuid": uuids, "species_name": species_names_list})
-
-            # Store embeddings separately as they're numpy arrays
-            embeddings_dict = {uuid: emb for uuid, emb in zip(uuids, embeddings)}
-
-            logger.info(
-                f"Loaded {len(df)} rows into DataFrame from {len(set(species_names_list))} species"
-            )
-            return df, embeddings_dict, species_names
-
-        except sqlite3.Error as e:
-            logger.error(f"SQLite error on attempt {attempt+1}: {str(e)}")
-            if "conn" in locals():
-                try:
-                    conn.close()
-                    logger.info("Closed database connection after error")
-                except:
-                    pass
-
-            if attempt < max_retries - 1:
-                wait_time = retry_delay * (attempt + 1)
-                logger.info(f"Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
-            else:
-                logger.error("Maximum retries reached, giving up")
-                return pd.DataFrame(), {}, []
+            # Set success flag
+            success_flag = 1
 
         except Exception as e:
-            logger.error(f"Unexpected error on attempt {attempt+1}: {str(e)}")
+            logger.error(f"Error loading data: {str(e)}")
             import traceback
 
             logger.error(traceback.format_exc())
+            # Failed to load data
+            rank_data = [
+                {"df": pd.DataFrame(), "embeddings_dict": {}, "species_list": []}
+                for _ in range(world_size)
+            ]
+            success_flag = 0
+    else:
+        # Other ranks don't need these initialized
+        success_flag = 0
+        rank_data = None
 
-            if "conn" in locals():
-                try:
-                    conn.close()
-                    logger.info("Closed database connection after error")
-                except:
-                    pass
+    # Broadcast success flag from rank 0 to all ranks
+    # Create tensor on the appropriate device based on available process group
+    if gloo_group:
+        # GLOO can handle CPU tensors
+        success_tensor = torch.tensor([success_flag], dtype=torch.int32)
+        dist.broadcast(success_tensor, 0, group=gloo_group)
+    else:
+        # Default group might be NCCL which requires CUDA tensors
+        if torch.cuda.is_available():
+            success_tensor = torch.tensor(
+                [success_flag], dtype=torch.int32, device="cuda"
+            )
+            dist.broadcast(success_tensor, 0)
+        else:
+            # If no CUDA available, try with CPU tensor but this might fail with NCCL
+            logger.warning(
+                "No CUDA available but might be using NCCL backend - this could fail"
+            )
+            success_tensor = torch.tensor([success_flag], dtype=torch.int32)
+            try:
+                dist.broadcast(success_tensor, 0)
+            except RuntimeError as e:
+                logger.error(f"Failed to broadcast with default group: {e}")
+                logger.error(
+                    "This likely means NCCL is being used with CPU tensors, which is not supported"
+                )
+                if rank == 0:
+                    # If rank 0, create a dummy success value for other ranks
+                    success_flag = 0
+                else:
+                    # If not rank 0, assume failure
+                    success_flag = 0
 
-            if attempt < max_retries - 1:
-                wait_time = retry_delay * (attempt + 1)
-                logger.info(f"Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
+    success_flag = success_tensor.item()
+
+    if success_flag == 0:
+        logger.error("Rank 0 failed to load data, aborting")
+        return pd.DataFrame(), {}, []
+
+    # Now distribute data to all ranks
+    if rank == 0:
+        # For rank 0, just use its own data directly
+        my_data = rank_data[0]
+
+        # For each rank > 0, send their data
+        for r in range(1, world_size):
+            try:
+                # Pickle the data for this rank
+                pickled_data = pickle.dumps(rank_data[r])
+
+                # Send the size first as an integer tensor
+                # Make sure to use the right device for the tensor
+                if gloo_group:
+                    size_tensor = torch.tensor([len(pickled_data)], dtype=torch.int64)
+                    dist.send(size_tensor, dst=r, group=gloo_group)
+                else:
+                    if torch.cuda.is_available():
+                        size_tensor = torch.tensor(
+                            [len(pickled_data)], dtype=torch.int64, device="cuda"
+                        )
+                    else:
+                        size_tensor = torch.tensor(
+                            [len(pickled_data)], dtype=torch.int64
+                        )
+                    dist.send(size_tensor, dst=r)
+
+                logger.info(f"Sent size {size_tensor.item()} to rank {r}")
+
+                # Break data into chunks of 10MB to avoid memory issues
+                chunk_size = 10 * 1024 * 1024
+                for i in range(0, len(pickled_data), chunk_size):
+                    end = min(i + chunk_size, len(pickled_data))
+                    chunk = pickled_data[i:end]
+
+                    # Make sure to use the right device for the tensor
+                    if gloo_group:
+                        chunk_tensor = torch.ByteTensor(list(chunk))
+                        dist.send(chunk_tensor, dst=r, group=gloo_group)
+                    else:
+                        if torch.cuda.is_available():
+                            chunk_tensor = torch.tensor(
+                                list(chunk), dtype=torch.uint8, device="cuda"
+                            )
+                        else:
+                            chunk_tensor = torch.ByteTensor(list(chunk))
+                        dist.send(chunk_tensor, dst=r)
+
+                    logger.info(
+                        f"Sent chunk {i//chunk_size + 1} of {(len(pickled_data) + chunk_size - 1)//chunk_size} to rank {r}"
+                    )
+            except Exception as e:
+                logger.error(f"Error sending data to rank {r}: {str(e)}")
+                import traceback
+
+                logger.error(traceback.format_exc())
+
+        return my_data["df"], my_data["embeddings_dict"], my_data["species_list"]
+    else:
+        # For other ranks, receive data from rank 0
+        try:
+            # First receive the size
+            if gloo_group:
+                size_tensor = torch.tensor([0], dtype=torch.int64)
+                dist.recv(size_tensor, src=0, group=gloo_group)
             else:
-                logger.error("Maximum retries reached, giving up")
-                return pd.DataFrame(), {}, []
+                if torch.cuda.is_available():
+                    size_tensor = torch.tensor([0], dtype=torch.int64, device="cuda")
+                else:
+                    size_tensor = torch.tensor([0], dtype=torch.int64)
+                dist.recv(size_tensor, src=0)
+
+            total_size = size_tensor.item()
+            logger.info(f"Will receive {total_size} bytes from rank 0")
+
+            # Receive the data in chunks
+            data_chunks = []
+            chunk_size = 10 * 1024 * 1024
+            num_chunks = (total_size + chunk_size - 1) // chunk_size
+
+            for i in range(num_chunks):
+                # For the last chunk, use the remaining size
+                if i == num_chunks - 1:
+                    remaining = total_size - i * chunk_size
+                    if gloo_group:
+                        chunk_tensor = torch.empty(remaining, dtype=torch.uint8)
+                    else:
+                        if torch.cuda.is_available():
+                            chunk_tensor = torch.empty(
+                                remaining, dtype=torch.uint8, device="cuda"
+                            )
+                        else:
+                            chunk_tensor = torch.empty(remaining, dtype=torch.uint8)
+                else:
+                    if gloo_group:
+                        chunk_tensor = torch.empty(chunk_size, dtype=torch.uint8)
+                    else:
+                        if torch.cuda.is_available():
+                            chunk_tensor = torch.empty(
+                                chunk_size, dtype=torch.uint8, device="cuda"
+                            )
+                        else:
+                            chunk_tensor = torch.empty(chunk_size, dtype=torch.uint8)
+
+                if gloo_group:
+                    dist.recv(chunk_tensor, src=0, group=gloo_group)
+                else:
+                    dist.recv(chunk_tensor, src=0)
+
+                # If tensor is on GPU, move to CPU for conversion to bytes
+                if chunk_tensor.device.type == "cuda":
+                    chunk_tensor = chunk_tensor.cpu()
+
+                data_chunks.append(chunk_tensor.numpy().tobytes())
+                logger.info(f"Received chunk {i+1}/{num_chunks} from rank 0")
+
+            # Combine all chunks
+            all_data = b"".join(data_chunks)
+
+            # Deserialize the data
+            my_data = pickle.loads(all_data)
+            logger.info(
+                f"Successfully deserialized data: {len(my_data['species_list'])} species, {len(my_data['df'])} samples"
+            )
+
+            return my_data["df"], my_data["embeddings_dict"], my_data["species_list"]
+        except Exception as e:
+            logger.error(f"Error receiving data from rank 0: {str(e)}")
+            import traceback
+
+            logger.error(traceback.format_exc())
+            return pd.DataFrame(), {}, []
+
+
+# def load_data_from_sqlite(db_path, table_name, rank, world_size, logger):
+#     """Load entire SQLite table into DataFrame, then do all filtering in pandas."""
+#     logger.info(f"Loading entire table from {db_path} into memory")
+
+#     # Set initial retry parameters
+#     max_retries = 5
+#     retry_delay = 5  # seconds
+
+#     for attempt in range(max_retries):
+#         try:
+#             # Add delay between ranks to reduce contention
+#             time.sleep(rank * 3)  # Stagger access based on rank
+
+#             # Use simplest possible query - just read the entire table
+#             logger.info(f"Attempt {attempt+1}: Reading entire table into DataFrame")
+#             query = f"SELECT uuid, species_name, embedding FROM {table_name}"
+
+#             # Read the data without processing the BLOB column yet
+#             raw_df = pd.read_sql_query(query, f"sqlite:///{db_path}")
+#             logger.info(f"Successfully loaded {len(raw_df)} rows into DataFrame")
+
+#             # Now do all the filtering in pandas
+#             logger.info("Filtering in pandas and distributing species")
+
+#             # Filter for non-null species names
+#             raw_df = raw_df[
+#                 raw_df["species_name"].notna() & (raw_df["species_name"] != "")
+#             ]
+#             logger.info(f"After filtering: {len(raw_df)} rows remain")
+
+#             if len(raw_df) == 0:
+#                 logger.warning("No valid data found after filtering")
+#                 return pd.DataFrame(), {}, []
+
+#             # Extract and convert embeddings
+#             embeddings_dict = {}
+#             for i, row in tqdm(
+#                 raw_df.iterrows(), total=len(raw_df), desc="Processing embeddings"
+#             ):
+#                 try:
+#                     # Convert BLOB to numpy array
+#                     embedding = np.frombuffer(row["embedding"], dtype=np.float32)
+#                     embeddings_dict[row["uuid"]] = embedding
+#                 except Exception as embed_err:
+#                     logger.warning(
+#                         f"Error with embedding for UUID {row['uuid']}: {str(embed_err)}"
+#                     )
+#                     # Add empty embedding as placeholder
+#                     embeddings_dict[row["uuid"]] = np.zeros(1024, dtype=np.float32)
+
+#             # Get unique species and sort them for consistent distribution
+#             all_species = sorted(raw_df["species_name"].unique())
+#             logger.info(f"Found {len(all_species)} unique species")
+
+#             # Distribute species alphabetically, ensuring all samples of a species
+#             # go to the same rank
+#             species_chunks = np.array_split(all_species, world_size)
+#             my_species = species_chunks[rank].tolist()
+
+#             logger.info(f"Rank {rank} will process {len(my_species)} species")
+#             if len(my_species) > 0:
+#                 logger.info(f"Species range: {my_species[0]} to {my_species[-1]}")
+
+#             # Filter DataFrame to only include species for this rank
+#             filtered_df = raw_df[raw_df["species_name"].isin(my_species)].copy()
+#             logger.info(f"Filtered to {len(filtered_df)} rows for assigned species")
+
+#             # Clean up memory
+#             del raw_df
+
+#             # Return results
+#             return filtered_df, embeddings_dict, my_species
+
+#         except Exception as e:
+#             logger.error(f"Error loading data on attempt {attempt+1}: {str(e)}")
+#             import traceback
+
+#             logger.error(traceback.format_exc())
+
+#             if attempt < max_retries - 1:
+#                 wait_time = retry_delay * (attempt + 1)
+#                 logger.info(f"Retrying in {wait_time} seconds...")
+#                 time.sleep(wait_time)
+#             else:
+#                 logger.error("Maximum retries reached, giving up")
+#                 return pd.DataFrame(), {}, []
 
 
 def find_optimal_k_gpu(embeddings, k_range, logger):
@@ -1172,9 +1397,13 @@ def main():
         if not checkpoint or "complete" not in checkpoint or not checkpoint["complete"]:
             # Load data from SQLite
             load_start = time.time()
-            df, embeddings_dict, species_list = load_data_from_sqlite(
+            # df, embeddings_dict, species_list = load_data_from_sqlite(
+            #     args.db_path, args.table_name, rank, world_size, logger
+            # )
+            df, embeddings_dict, species_list = load_and_distribute_data(
                 args.db_path, args.table_name, rank, world_size, logger
             )
+
             if len(df) == 0:
                 logger.error("No data loaded from database")
                 return

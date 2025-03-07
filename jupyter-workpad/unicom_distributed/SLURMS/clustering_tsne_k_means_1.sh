@@ -36,12 +36,19 @@ MASTER_NODE=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 echo "Using master node: $MASTER_NODE"
 export MASTER_ADDR=$MASTER_NODE
 
-# Force IPv4 and set network parameters
-export NCCL_SOCKET_IFNAME=eth0
 export GLOO_SOCKET_IFNAME=eth0
-export NCCL_IB_DISABLE=1
-export NCCL_DEBUG=INFO
-export NCCL_IP_VERSION=4
+# Increase timeouts for better stability
+export GLOO_TIMEOUT_SECONDS=3600  # 1 hour timeout
+
+
+# Force IPv4 and set network parameters
+# export NCCL_SOCKET_IFNAME=eth0
+# export NCCL_IB_DISABLE=1
+# export NCCL_DEBUG=INFO
+# export NCCL_IP_VERSION=4
+
+export PYTORCH_DISTRIBUTED_SOCKET_TIMEOUT=3600  # 1 hour timeout
+
 
 # Set variables
 DB_PATH="/blue/arthur.porto-biocosmos/tdeatherage3.gatech/embeddings/image_embeddings.sqlite"
