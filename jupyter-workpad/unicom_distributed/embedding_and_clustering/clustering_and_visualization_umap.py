@@ -12,6 +12,7 @@ from tqdm import tqdm
 import torch
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
+from sklearn.metrics.pairwise import cosine_similarity
 import pickle
 import signal
 import sys
@@ -42,7 +43,7 @@ def setup_logging(log_dir):
     """Set up logging configuration."""
     os.makedirs(log_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f"clustering_and_viz_umap_{timestamp}.log")
+    log_file = os.path.join(log_dir, f"clustering_and_viz_umap_cosine_{timestamp}.log")
 
     # Configure logging
     logger = logging.getLogger()
@@ -118,23 +119,53 @@ def load_data_for_species(db_path, table_name, target_species, logger):
         return pd.DataFrame(), {}
 
 
+def normalize_embeddings(embeddings):
+    """Normalize embeddings to unit length for cosine similarity."""
+    # Handle different types of input (GPU arrays, numpy arrays, etc.)
+    if hasattr(embeddings, "get"):
+        # For cuML arrays
+        embeddings_np = embeddings.get()
+        norms = np.linalg.norm(embeddings_np, axis=1, keepdims=True)
+        normalized = embeddings_np / (norms + 1e-10)  # Avoid division by zero
+        # Convert back to the original format if needed
+        return normalized
+    elif hasattr(embeddings, "to_numpy"):
+        # For pandas DataFrames
+        embeddings_np = embeddings.to_numpy()
+        norms = np.linalg.norm(embeddings_np, axis=1, keepdims=True)
+        return embeddings_np / (norms + 1e-10)
+    elif isinstance(embeddings, torch.Tensor):
+        # For PyTorch tensors
+        norms = torch.norm(embeddings, dim=1, keepdim=True)
+        return (embeddings / (norms + 1e-10)).cpu().numpy()
+    else:
+        # For numpy arrays
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        return embeddings / (norms + 1e-10)
+
+
 def find_optimal_k(embeddings, k_range, use_gpu, logger):
-    """Find optimal number of clusters using silhouette scores."""
+    """Find optimal number of clusters using silhouette scores with cosine similarity."""
     best_score = -1
     best_k = 2  # Default to 2 clusters
 
-    logger.info(f"Finding optimal k in range {k_range}")
+    logger.info(f"Finding optimal k in range {k_range} using cosine similarity")
+
+    # Normalize embeddings for cosine similarity
+    normalized_embeddings = normalize_embeddings(embeddings)
 
     # Try GPU implementation if available
     if use_gpu and CUML_AVAILABLE and torch.cuda.is_available():
         try:
-            logger.info("Using GPU-accelerated K-means for hyperparameter search")
+            logger.info(
+                "Using GPU-accelerated K-means with cosine similarity for hyperparameter search"
+            )
 
             for k in range(k_range[0], k_range[1] + 1):
                 try:
-                    # Use cuML KMeans
+                    # Use cuML KMeans with normalized embeddings (equivalent to cosine distance)
                     kmeans = cuKMeans(n_clusters=k, random_state=42)
-                    labels = kmeans.fit_predict(embeddings)
+                    labels = kmeans.fit_predict(normalized_embeddings)
 
                     # Convert to NumPy if needed
                     if hasattr(labels, "get"):
@@ -146,22 +177,17 @@ def find_optimal_k(embeddings, k_range, use_gpu, logger):
                     else:
                         labels_cpu = np.array(labels)
 
-                    # Convert embeddings to CPU if needed
-                    if hasattr(embeddings, "get"):
-                        embeddings_cpu = embeddings.get()
-                    elif hasattr(embeddings, "to_numpy"):
-                        embeddings_cpu = embeddings.to_numpy()
-                    elif isinstance(embeddings, torch.Tensor):
-                        embeddings_cpu = embeddings.cpu().numpy()
-                    else:
-                        embeddings_cpu = np.array(embeddings)
-
                     # Skip if only one cluster
                     if len(np.unique(labels_cpu)) < 2:
                         continue
 
-                    score = silhouette_score(embeddings_cpu, labels_cpu)
-                    logger.info(f"K={k}, Silhouette Score={score:.4f}")
+                    # Calculate silhouette score with cosine metric
+                    from sklearn.metrics import silhouette_score
+
+                    score = silhouette_score(
+                        normalized_embeddings, labels_cpu, metric="cosine"
+                    )
+                    logger.info(f"K={k}, Silhouette Score (cosine)={score:.4f}")
 
                     if score > best_score:
                         best_score = score
@@ -178,18 +204,19 @@ def find_optimal_k(embeddings, k_range, use_gpu, logger):
             # Continue to CPU implementation
 
     # CPU implementation
-    logger.info("Using CPU K-means for hyperparameter search")
+    logger.info("Using CPU K-means with cosine similarity for hyperparameter search")
     for k in range(k_range[0], k_range[1] + 1):
         try:
             kmeans = KMeans(n_clusters=k, random_state=42)
-            labels = kmeans.fit_predict(embeddings)
+            labels = kmeans.fit_predict(normalized_embeddings)
 
             # Skip if only one cluster
             if len(np.unique(labels)) < 2:
                 continue
 
-            score = silhouette_score(embeddings, labels)
-            logger.info(f"K={k}, Silhouette Score={score:.4f}")
+            # Use cosine metric for silhouette score
+            score = silhouette_score(normalized_embeddings, labels, metric="cosine")
+            logger.info(f"K={k}, Silhouette Score (cosine)={score:.4f}")
 
             if score > best_score:
                 best_score = score
@@ -226,6 +253,7 @@ def generate_umap(embeddings, use_gpu, n_neighbors, min_dist, logger, n_componen
                 n_neighbors=adjusted_n_neighbors,
                 min_dist=min_dist,
                 random_state=42,
+                metric="cosine",  # Use cosine metric for UMAP as well
             )
             umap_result = umap_reducer.fit_transform(embeddings)
 
@@ -245,7 +273,7 @@ def generate_umap(embeddings, use_gpu, n_neighbors, min_dist, logger, n_componen
                 umap_max = np.max(umap_result, axis=0)
                 umap_result = (umap_result - umap_min) / (umap_max - umap_min + 1e-8)
 
-            logger.info("Successfully used GPU-accelerated UMAP")
+            logger.info("Successfully used GPU-accelerated UMAP with cosine metric")
             return umap_result
         except Exception as e:
             logger.warning(f"GPU UMAP failed, falling back to CPU: {str(e)}")
@@ -253,13 +281,14 @@ def generate_umap(embeddings, use_gpu, n_neighbors, min_dist, logger, n_componen
     # Fall back to CPU UMAP
     try:
         logger.info(
-            f"Using CPU UMAP with n_neighbors={adjusted_n_neighbors}, min_dist={min_dist}"
+            f"Using CPU UMAP with n_neighbors={adjusted_n_neighbors}, min_dist={min_dist}, metric=cosine"
         )
         umap_reducer = umap.UMAP(
             n_components=n_components,
             n_neighbors=adjusted_n_neighbors,
             min_dist=min_dist,
             random_state=42,
+            metric="cosine",  # Use cosine metric for UMAP as well
         )
         umap_result = umap_reducer.fit_transform(embeddings)
         if umap_result is not None:
@@ -268,7 +297,7 @@ def generate_umap(embeddings, use_gpu, n_neighbors, min_dist, logger, n_componen
             umap_max = np.max(umap_result, axis=0)
             umap_result = (umap_result - umap_min) / (umap_max - umap_min + 1e-8)
 
-        logger.info("Successfully used CPU UMAP")
+        logger.info("Successfully used CPU UMAP with cosine metric")
         return umap_result
     except Exception as e:
         logger.error(f"CPU UMAP failed: {str(e)}")
@@ -307,8 +336,10 @@ def perform_umap_and_clustering(
     # Get valid dataframe with only rows that have valid embeddings
     valid_df = species_df.iloc[valid_indices].copy().reset_index(drop=True)
 
-    # Compute UMAP
-    logger.info(f"Computing UMAP for {species_name} ({len(embeddings)} samples)")
+    # Compute UMAP with cosine metric
+    logger.info(
+        f"Computing UMAP for {species_name} ({len(embeddings)} samples) using cosine metric"
+    )
     umap_result = generate_umap(embeddings, use_gpu, n_neighbors, min_dist, logger)
 
     if umap_result is None or len(umap_result) == 0:
@@ -319,21 +350,28 @@ def perform_umap_and_clustering(
     valid_df["x"] = umap_result[:, 0]
     valid_df["y"] = umap_result[:, 1]
 
-    # Find optimal number of clusters
-    logger.info(f"Finding optimal k for {species_name}")
+    # Find optimal number of clusters using cosine similarity
+    logger.info(f"Finding optimal k for {species_name} using cosine similarity")
     optimal_k, score = find_optimal_k(umap_result, [min_k, max_k], use_gpu, logger)
     score_formatted = f"{score:.4f}" if score is not None else "0.0000"
-    logger.info(f"Optimal k for {species_name}: {optimal_k} (score: {score_formatted})")
+    logger.info(
+        f"Optimal k for {species_name}: {optimal_k} (cosine similarity score: {score_formatted})"
+    )
 
-    # Perform final clustering
-    logger.info(f"Performing final clustering with k={optimal_k}")
+    # Normalize UMAP results for cosine-based clustering
+    normalized_umap = normalize_embeddings(umap_result)
+
+    # Perform final clustering with cosine similarity
+    logger.info(
+        f"Performing final clustering with k={optimal_k} using cosine similarity"
+    )
     clusters = None
 
     # Try GPU K-means
     if use_gpu and CUML_AVAILABLE and torch.cuda.is_available():
         try:
             kmeans = cuKMeans(n_clusters=optimal_k, random_state=42)
-            clusters = kmeans.fit_predict(umap_result)
+            clusters = kmeans.fit_predict(normalized_umap)
 
             # Convert to NumPy if needed
             if hasattr(clusters, "get"):
@@ -345,7 +383,9 @@ def perform_umap_and_clustering(
             else:
                 clusters = np.array(clusters)
 
-            logger.info("Used GPU-accelerated K-means for final clustering")
+            logger.info(
+                "Used GPU-accelerated K-means with cosine similarity for final clustering"
+            )
         except Exception as e:
             logger.warning(f"GPU K-means failed, falling back to CPU: {str(e)}")
             clusters = None
@@ -354,8 +394,8 @@ def perform_umap_and_clustering(
     if clusters is None:
         try:
             kmeans = KMeans(n_clusters=optimal_k, random_state=42)
-            clusters = kmeans.fit_predict(umap_result)
-            logger.info("Used CPU K-means for final clustering")
+            clusters = kmeans.fit_predict(normalized_umap)
+            logger.info("Used CPU K-means with cosine similarity for final clustering")
         except Exception as e:
             logger.error(f"CPU K-means failed: {str(e)}")
             # Assign all to cluster 0 as fallback
@@ -367,7 +407,7 @@ def perform_umap_and_clustering(
     # Create statistics
     stats = {
         "count": len(valid_df),
-        "method": "umap_clustering",
+        "method": "umap_cosine_clustering",
         "optimal_k": optimal_k,
         "silhouette_score": score,
     }
@@ -426,11 +466,16 @@ def extract_image_from_tar(uuid, shard_id, data_dir, logger):
 
 def get_cluster_representatives(df, embeddings, umap_result, logger):
     """Find representative samples for each cluster (closest to centroid)."""
-    logger.info("Finding representative samples for each cluster")
+    logger.info(
+        "Finding representative samples for each cluster using cosine similarity"
+    )
 
     # Get unique clusters
     clusters = sorted(df["cluster"].unique())
     representatives = {}
+
+    # Normalize embeddings for cosine similarity
+    normalized_embeddings = normalize_embeddings(embeddings)
 
     for cluster_id in clusters:
         logger.info(f"Finding representative for cluster {cluster_id}")
@@ -450,23 +495,25 @@ def get_cluster_representatives(df, embeddings, umap_result, logger):
             }
             continue
 
-        # Get embeddings for this cluster
-        cluster_embeddings = embeddings[cluster_indices]
+        # Get normalized embeddings for this cluster
+        cluster_embeddings = normalized_embeddings[cluster_indices]
 
-        # Calculate cluster centroid
+        # Calculate cluster centroid (for normalized vectors, still makes sense for cosine)
         centroid = np.mean(cluster_embeddings, axis=0)
+        # Re-normalize the centroid
+        centroid = centroid / np.linalg.norm(centroid)
 
-        # Find the sample closest to the centroid
-        distances = np.sqrt(np.sum((cluster_embeddings - centroid) ** 2, axis=1))
-        closest_idx = cluster_indices[np.argmin(distances)]
+        # Calculate cosine similarity to find closest
+        similarities = np.dot(cluster_embeddings, centroid)
+        most_central_idx = cluster_indices[np.argmax(similarities)]
 
         # Get position in UMAP space
-        position = (df.iloc[closest_idx]["x"], df.iloc[closest_idx]["y"])
+        position = (df.iloc[most_central_idx]["x"], df.iloc[most_central_idx]["y"])
 
         representatives[cluster_id] = {
-            "index": closest_idx,
-            "uuid": df.iloc[closest_idx]["uuid"],
-            "shard_id": df.iloc[closest_idx]["shard_id"],
+            "index": most_central_idx,
+            "uuid": df.iloc[most_central_idx]["uuid"],
+            "shard_id": df.iloc[most_central_idx]["shard_id"],
             "position": position,
         }
 
@@ -596,7 +643,7 @@ def generate_visualization(
 
     # Titles and labels
     plt.title(
-        f"UMAP Visualization of {species_name}\n({len(species_df)} samples)",
+        f"UMAP Visualization of {species_name}\n({len(species_df)} samples, Cosine Similarity)",
         fontsize=16,
     )
     plt.xlabel("UMAP dimension 1", fontsize=14)
@@ -618,7 +665,7 @@ def generate_visualization(
     # Save the figure
     os.makedirs(output_dir, exist_ok=True)
     safe_name = species_name.replace(" ", "_").lower()
-    output_path = os.path.join(output_dir, f"{safe_name}_umap_with_images.png")
+    output_path = os.path.join(output_dir, f"{safe_name}_umap_cosine_with_images.png")
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
 
@@ -646,7 +693,7 @@ def numpy_to_python_types(obj):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="UMAP-based clustering and visualization for specific species"
+        description="UMAP-based clustering and visualization with cosine similarity for specific species"
     )
     parser.add_argument(
         "--db-path",
@@ -713,7 +760,9 @@ def main():
 
     # Set up logging
     logger = setup_logging(args.log_dir)
-    logger.info("Starting UMAP-based clustering and visualization script")
+    logger.info(
+        "Starting UMAP-based clustering and visualization script with cosine similarity"
+    )
 
     # Check GPU availability
     if args.use_gpu:
@@ -753,7 +802,7 @@ def main():
             logger.warning(f"No data found for species {species_name}")
             continue
 
-        # Perform UMAP and clustering
+        # Perform UMAP and clustering with cosine similarity
         processed_df, stats, embeddings = perform_umap_and_clustering(
             species_df,
             embeddings_dict,
@@ -789,7 +838,7 @@ def main():
         )
 
     # Save statistics
-    stats_path = os.path.join(args.output_dir, "clustering_stats_umap.json")
+    stats_path = os.path.join(args.output_dir, "clustering_stats_umap_cosine.json")
 
     # Convert numpy types to standard Python types for JSON serialization
     converted_stats = numpy_to_python_types(all_species_stats)
