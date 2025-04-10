@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:a100:2           # Request 2 A100 GPUs
 #SBATCH --mem=500gb                 # Memory for the node (high for SQLite DB in memory)
 #SBATCH --time=148:00:00             # Maximum runtime
-#SBATCH --output=/blue/arthur.porto-biocosmos/tdeatherage3.gatech/logs/unicom_training_distributed/unicom_training_distributed_%j.log
+#SBATCH --output=/blue/arthur.porto-biocosmos/tdeatherage3.gatech/logs/unicom_training_distributed_%j.log
 #SBATCH --mail-type=END,FAIL,TIME_LIMIT_50,TIME_LIMIT_80,TIME_LIMIT_90
 #SBATCH --requeue                   # Allow the job to be requeued
 #SBATCH --open-mode=append          # Append to output files if restarted

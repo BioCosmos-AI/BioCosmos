@@ -71,7 +71,7 @@ def load_data_from_sqlite(db_path, logger=None):
         logger.info(f"Loading data from {db_path}")
 
     try:
-        connection = sqlite3.connect(db_path, timeout=600.0)
+        connection = sqlite3.connect(db_path, timeout=900.0)
         if logger:
             logger.info(f"Connected to database")
 
@@ -82,9 +82,11 @@ def load_data_from_sqlite(db_path, logger=None):
         WHERE single_node_cluster IS NOT NULL
             AND species_name IS NOT NULL 
             AND species_name != ''
-            AND rowid >= 60001
-            AND rowid <= 70000
         """
+        # Aribtrary 100000 records sample for testing
+        # AND rowid >= 60001
+        # AND rowid <= 70000
+        # """
         if logger:
             logger.info("Executing query to retrieve clustering data")
 
@@ -197,7 +199,9 @@ class TreeOfLifeWebDataset:
                 )
             ),
             wds.shuffle(100, seed=seed),
-            wds.batched(self.batch_size, partial=False),  # <-- this may
+            wds.batched(
+                self.batch_size, partial=False
+            ),  # <-- Partial == True causes issues with NCCL, so this means we're losing <= 15 samples at boundary batches
         )
 
         return ds
@@ -218,6 +222,7 @@ def train_epoch(
     args,
     logger,
     rank=0,
+    dataset=None,
 ):
     """Train one epoch."""
     model.train()
@@ -244,6 +249,7 @@ def train_epoch(
         labels = labels.long().cuda(non_blocking=True)
 
         # Forward pass with automatic mixed precision
+        # I had trouble with mixed precision training, so I'm not using it.  This should be fine though, just slower.
 
         if args.use_amp:
             with autocast(enabled=args.use_amp):
@@ -275,7 +281,7 @@ def train_epoch(
         if rank == 0 and i % args.log_freq == 0:
             logger.info(
                 # f"Epoch: [{epoch}][{i}/{len(data_loader)}] "
-                f"Epoch: [{epoch}][{i}] "
+                f"Epoch: [{epoch}][{i}/{len(dataset)} batches] "
                 f"Time {batch_time.val:.3f} ({batch_time.avg:.3f}) "
                 f"Data {data_time.val:.3f} ({data_time.avg:.3f}) "
                 f"Loss {loss.item():.4f} ({np.mean(losses):.4f}) "
@@ -631,6 +637,7 @@ def main():
             args,
             logger if global_rank == 0 else None,
             rank=global_rank,
+            dataset=dataset,
         )
 
         if global_rank == 0:
