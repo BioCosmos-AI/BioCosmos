@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=8           # 8 CPUs per GPU for data loading
 #SBATCH --gres=gpu:a100:2           # Request 2 A100 GPUs
 #SBATCH --mem=500gb                 # Memory for the node (high for SQLite DB in memory)
-#SBATCH --time=48:00:00             # Maximum runtime
-#SBATCH --output=/home/tdeatherage3.gatech/logs/unicom_train_%j.log
+#SBATCH --time=148:00:00             # Maximum runtime
+#SBATCH --output=/blue/arthur.porto-biocosmos/tdeatherage3.gatech/logs/unicom_training_distributed/unicom_training_distributed_%j.log
 #SBATCH --mail-type=END,FAIL,TIME_LIMIT_50,TIME_LIMIT_80,TIME_LIMIT_90
 #SBATCH --requeue                   # Allow the job to be requeued
 #SBATCH --open-mode=append          # Append to output files if restarted
@@ -33,10 +33,14 @@ conda activate ${CONDA_ENV_PATH}
 
 # Set variables
 DB_PATH="/blue/arthur.porto-biocosmos/tdeatherage3.gatech/embeddings/image_embeddings.sqlite"
+
 WEBDATASET_PATH="/blue/arthur.porto-biocosmos/data/datasets/TreeOfLife-10M/dataset/evobio10m-CVPR-2024/224x224/train"
-OUTPUT_DIR="/home/tdeatherage3.gatech/unicom/output"
-CHECKPOINT_DIR="/home/tdeatherage3.gatech/unicom/checkpoints"
-LOG_DIR="/home/tdeatherage3.gatech/logs/unicom_train_${SLURM_JOB_ID}"
+# OUTPUT_DIR="/home/tdeatherage3.gatech/unicom/output"
+OUTPUT_DIR="/blue/arthur.porto-biocosmos/tdeatherage3.gatech/unicom/output"
+# CHECKPOINT_DIR="/home/tdeatherage3.gatech/unicom/checkpoints"
+CHECKPOINT_DIR="/blue/arthur.porto-biocosmos/tdeatherage3.gatech/unicom/checkpoints"
+# LOG_DIR="/home/tdeatherage3.gatech/logs/unicom_train_${SLURM_JOB_ID}"
+LOG_DIR="/blue/arthur.porto-biocosmos/tdeatherage3.gatech/logs/unicom_training_distributed_${SLURM_JOB_ID}"
 
 # Set training parameters
 BATCH_SIZE=16  # Per GPU

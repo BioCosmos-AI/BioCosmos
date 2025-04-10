@@ -39,7 +39,7 @@ def setup_logging(log_dir):
     """Set up logging configuration."""
     os.makedirs(log_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f"unicom_train_{timestamp}.log")
+    log_file = os.path.join(log_dir, f"unicom_training_distributed_{timestamp}.log")
 
     # Configure logging
     logger = logging.getLogger()
@@ -123,7 +123,7 @@ def load_data_from_sqlite(db_path, logger=None):
 
 
 class TreeOfLifeWebDataset:
-    """WebDataset iterator for TreeOfLife10M with clustering info."""
+    """WebDataset iterator for TreeOfLife10M with clustering info that evenly distributes images across GPUs."""
 
     def __init__(
         self, webdataset_path, df, transform=None, world_size=1, rank=0, batch_size=64
@@ -138,28 +138,28 @@ class TreeOfLifeWebDataset:
         # Create mapping from uuid to label
         self.uuid_to_label = dict(zip(df["uuid"], df["label"]))
 
-        # Get all unique shard IDs and distribute them to ranks
+        # For even distribution across GPUs, we'll use a simple approach:
+        # Each GPU gets a subset of images based on its rank and the total number of GPUs
+        # We'll filter by the image index (via the UUID) rather than by shard
+        self.rank_uuids = []
+        all_uuids = sorted(df["uuid"].unique())
+
+        # Distribute UUIDs evenly to ranks
+        for i, uuid in enumerate(all_uuids):
+            if i % world_size == rank:
+                self.rank_uuids.append(uuid)
+
+        # Store the UUIDs for this rank in a set for faster lookups
+        self.rank_uuid_set = set(self.rank_uuids)
+
+        # Get all shard IDs (we'll still use all shards but filter by UUID)
         self.shard_ids = sorted(df["shard_id"].unique())
 
-        # Distribute shards to ranks (each rank gets a subset of shards)
-        num_shards = len(self.shard_ids)
-        shards_per_rank = num_shards // world_size + (
-            1 if num_shards % world_size > 0 else 0
-        )
-        start_idx = rank * shards_per_rank
-        end_idx = min(start_idx + shards_per_rank, num_shards)
-
-        # Get shards for this rank
-        self.rank_shard_ids = self.shard_ids[start_idx:end_idx]
-
         # Estimate number of samples per rank
-        self.num_samples = len(df)
-        self.samples_per_rank = self.num_samples // world_size + (
-            1 if rank < self.num_samples % world_size else 0
-        )
+        self.num_samples = len(self.rank_uuids)
 
     def create_loader(self, epoch=0):
-        """Create a WebDataset pipeline for training."""
+        """Create a WebDataset pipeline for training with even image distribution."""
         # Set random seed based on epoch for consistent shuffling
         seed = epoch + self.rank * 10000
         random.seed(seed)
@@ -170,63 +170,41 @@ class TreeOfLifeWebDataset:
             for shard_id in self.shard_ids
         ]
 
-        print(f"All URLs: {all_urls}")
-
-        if not all_urls:
-            # Handle case where a rank might get no shards
-            return wds.DataPipeline(
-                wds.ListDataset([{"__key__": "dummy", "jpg": torch.zeros(3, 224, 224)}])
+        if self.rank == 0:  # Only print from rank 0 to avoid console spam
+            print(
+                f"Using {len(all_urls)} shards, distributing {self.num_samples} images to rank {self.rank}"
             )
 
-        # # Create a DataPipeline explicitly with all the components
-        # ds = wds.DataPipeline(
-        #     wds.SimpleShardList(all_urls),
-        #     wds.shuffle(100),  # Shuffle shards
-        #     wds.split_by_node,  # Split by node first
-        #     wds.split_by_worker,  # Then split by worker
-        #     wds.tarfile_to_samples(),  # Convert tar files to samples
-        #     wds.select(
-        #         lambda x: x["__key__"].rsplit(".", 1)[0] in self.uuid_to_label
-        #     ),  # Filter samples
-        #     wds.decode("pilrgb"),  # Decode images
-        #     wds.map(
-        #         lambda x: (  # Map to (image, label) format
-        #             self.transform(x["jpg"]) if self.transform else x["jpg"],
-        #             self.uuid_to_label.get(x["__key__"].rsplit(".", 1)[0], 0),
-        #         )
-        #     ),
-        #     wds.shuffle(1000, seed=seed),  # Shuffle samples
-        #     wds.batched(self.batch_size),  # Batch samples
-        # )
-        # Create a DataPipeline explicitly
+        # Create a selection function that only keeps images assigned to this rank
+        def select_by_rank(sample):
+            # Extract the UUID from the key
+            uuid = sample["__key__"].split(".")[0]
+            # Keep only if this UUID is assigned to this rank
+            return uuid in self.rank_uuid_set
+
+        # Create the pipeline
         ds = wds.DataPipeline(
             wds.SimpleShardList(all_urls),
             wds.detshuffle(100, seed=seed),  # Deterministic shuffle of shards
-            wds.split_by_node,  # Split by node first
-            wds.split_by_worker,  # Then split by worker
-            wds.tarfile_to_samples(
-                handler=wds.warn_and_continue
-            ),  # More robust error handling
-            wds.select(
-                lambda x: x["__key__"].split(".")[0] in self.uuid_to_label
-            ),  # Filter by UUID
-            wds.decode("pilrgb"),  # Decode images
-            # Map function that extracts the correct data from the sample
+            # No need for split_by_node or split_by_worker - our selection function handles distribution
+            wds.tarfile_to_samples(handler=wds.warn_and_continue),
+            wds.select(select_by_rank),  # Select only images for this rank
+            wds.decode("pilrgb"),
             wds.map(
                 lambda sample: (
                     self.transform(sample["jpg"]) if self.transform else sample["jpg"],
                     self.uuid_to_label.get(sample["__key__"].split(".")[0], 0),
                 )
             ),
-            wds.shuffle(100, seed=seed),  # Smaller shuffle buffer to reduce memory
-            wds.batched(self.batch_size, partial=True),  # Allow partial batches
+            wds.shuffle(100, seed=seed),
+            wds.batched(self.batch_size, partial=False),  # <-- this may
         )
 
         return ds
 
     def __len__(self):
-        """Approximate length in batches."""
-        return max(1, self.samples_per_rank // self.batch_size)
+        """Return the number of batches on this rank."""
+        return max(1, self.num_samples // self.batch_size)
 
 
 def train_epoch(
