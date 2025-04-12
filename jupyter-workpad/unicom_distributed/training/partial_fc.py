@@ -1,4 +1,5 @@
-# This code is copied from https://github.com/deepglint/unicom/blob/main/unicom/partial_fc.py
+# This code is (mostly) copied from https://github.com/deepglint/unicom/blob/main/unicom/partial_fc.py
+# Modifications include comments
 
 import math
 from typing import Callable
@@ -200,8 +201,11 @@ class PartialFC_V2(torch.nn.Module):
             batch_size  # THOMAS: just setting last batch size to current batch size
         )
 
+        # Thomas modification: Changed this to match dtype to fix "ValueError: Invalid usage of tensors with different dtypesFound torch.float32 and torch.float16"
         _gather_embeddings = [
-            torch.zeros((batch_size, self.embedding_size)).cuda()
+            torch.zeros(
+                (batch_size, self.embedding_size), dtype=local_embeddings.dtype
+            ).cuda()  # <--- Thomas: Here dtype = local_embeddings.dtype
             for _ in range(self.world_size)
         ]
         _gather_labels = [

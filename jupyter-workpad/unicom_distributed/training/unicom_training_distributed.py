@@ -411,7 +411,8 @@ def main():
     parser.add_argument(
         "--use-amp",
         action="store_true",
-        default=False,  # I had trouble with this == True
+        # default=False,  # I had trouble with this == True
+        default=True,
         help="Use automatic mixed precision",
     )
 
