@@ -238,7 +238,6 @@ class PartialFC_V2(torch.nn.Module):
             weight = weight.index_select(1, ids_shuffle)
             embeddings = embeddings.index_select(1, ids_shuffle)
 
-        # BEGIN MODIFICATION BY THOMAS
         with torch.cuda.amp.autocast(self.fp16):
             if self.is_normlize:
                 norm_embeddings = normalize(embeddings)
@@ -246,16 +245,8 @@ class PartialFC_V2(torch.nn.Module):
                 logits = linear(norm_embeddings, norm_weight_activated)
             else:
                 logits = linear(embeddings, weight)
-
-        # Ensure logits is always the correct dtype before distributed operations
-        if self.fp16 and not torch.is_autocast_enabled():
-            logits = (
-                logits.half()
-            )  # Convert to half if we're using FP16 and not in autocast
-        else:
-            logits = logits.float()  # Otherwise ensure float32
-        # END MODIFICATION BY THOMAS
-
+        if self.fp16:
+            logits = logits.float()
         if self.is_normlize:
             logits = logits.clamp(-1, 1)
         else:

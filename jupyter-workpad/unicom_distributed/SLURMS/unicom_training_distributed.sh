@@ -2,11 +2,11 @@
 #SBATCH --job-name=unicom_train
 #SBATCH --partition=gpu             # GPU partition
 #SBATCH --nodes=1                   # Request 1 node
-#SBATCH --ntasks-per-node=2         # Use 2 GPUs on the node (adjust as needed)
+#SBATCH --ntasks-per-node=8         # Use 8 GPUs on the node (adjust as needed)
 #SBATCH --cpus-per-task=8           # 8 CPUs per GPU for data loading
-#SBATCH --gres=gpu:a100:2           # Request 2 A100 GPUs
+#SBATCH --gres=gpu:a100:8           # Request 8 A100 GPUs
 #SBATCH --mem=500gb                 # Memory for the node (high for SQLite DB in memory)
-#SBATCH --time=148:00:00             # Maximum runtime
+#SBATCH --time=14-00:00:00           # Maximum runtime 
 #SBATCH --output=/blue/arthur.porto-biocosmos/tdeatherage3.gatech/logs/unicom_training_distributed_%j.log
 #SBATCH --mail-type=END,FAIL,TIME_LIMIT_50,TIME_LIMIT_80,TIME_LIMIT_90
 #SBATCH --requeue                   # Allow the job to be requeued
