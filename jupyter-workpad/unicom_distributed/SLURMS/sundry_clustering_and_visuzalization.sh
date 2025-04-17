@@ -1,18 +1,15 @@
 #!/bin/bash
-#SBATCH --job-name=tsne_debug
+#SBATCH --job-name=tsne_full
 #SBATCH --partition=gpu           # GPU partition
 #SBATCH --nodes=1                 # Request 1 node
 #SBATCH --ntasks=1                # Run a single task
-#SBATCH --cpus-per-task=4         # 4 CPUs per task for data loading/processing
+#SBATCH --cpus-per-task=8         # 8 CPUs per task for data loading/processing
 #SBATCH --gres=gpu:1              # Request 1 GPU
-#SBATCH --mem=64gb                # Memory for the node
-#SBATCH --time=4:00:00            # Maximum runtime (HH:MM:SS)
-#SBATCH --output=tsne_debug_%j.log  # Output log
+#SBATCH --mem=96gb                # Memory for the node
+#SBATCH --time=12:00:00           # Maximum runtime (HH:MM:SS)
+#SBATCH --output=tsne_full_%j.log # Output log
 #SBATCH --mail-type=END,FAIL      # Email notifications
 #SBATCH --open-mode=append        # Append to output files if restarted
-
-# Turn on bash debugging
-set -x
 
 # Print job information
 echo "Job started at $(date)"
@@ -40,9 +37,19 @@ echo "Python version: $(python --version)"
 DB_PATH="/blue/arthur.porto-biocosmos/tdeatherage3.gatech/embeddings/image_embeddings.sqlite"
 TABLE_NAME="image_embeddings"
 DATA_DIR="/blue/arthur.porto-biocosmos/data/datasets/TreeOfLife-10M/dataset/evobio10m-CVPR-2024/224x224/train"
-LOG_DIR="$HOME/logs/tsne_debug_${SLURM_JOB_ID}"
+LOG_DIR="$HOME/logs/tsne_full_${SLURM_JOB_ID}"
 OUTPUT_DIR="$HOME/visualizations/sundry_tsne_clustering"
 SCRIPT_PATH="$HOME/unicom/embedding_and_clustering/sundry_clustering_and_visuzalization.py"
+
+# Define the species to analyze - use the default list from the Python script
+SPECIES=(
+    "Abagrotis alternata"
+    "Abaeis nicippe"
+    "Hemicircus canente"
+    "Hemigomphus comitatus"
+    "Zyrphelis crenata"
+    "Zygaena oxytropis"
+)
 
 # Check if the script exists
 if [ ! -f "$SCRIPT_PATH" ]; then
@@ -82,10 +89,22 @@ python -c "import pandas; print('Pandas version:', pandas.__version__)"
 python -c "import sklearn; print('Scikit-learn version:', sklearn.__version__)"
 python -c "import matplotlib; print('Matplotlib version:', matplotlib.__version__)"
 python -c "import sqlite3; print('SQLite3 version:', sqlite3.version)"
-python -c "try: import hdbscan; print('HDBSCAN version:', hdbscan.__version__); except ImportError: print('HDBSCAN not available')"
+if pip show hdbscan >/dev/null 2>&1; then
+    echo "HDBSCAN version: $(pip show hdbscan | grep Version | cut -d ' ' -f 2)"
+else
+    echo "HDBSCAN not installed"
+fi
 
-# Run with a single species first for debugging
-echo "Running t-SNE-based clustering and visualization script with a single species for debugging"
+# Format the species list for command line
+SPECIES_ARG=""
+for species in "${SPECIES[@]}"; do
+    SPECIES_ARG="$SPECIES_ARG \"$species\""
+done
+
+# Run the full analysis for all species
+echo "Running t-SNE-based clustering and visualization script for all species"
+echo "Species list: ${SPECIES_ARG}"
+
 python "$SCRIPT_PATH" \
     --db-path "$DB_PATH" \
     --table-name "$TABLE_NAME" \
@@ -93,35 +112,37 @@ python "$SCRIPT_PATH" \
     --log-dir "$LOG_DIR" \
     --output-dir "$OUTPUT_DIR" \
     --min-k 2 \
-    --max-k 5 \
+    --max-k 10 \
     --dbscan-min-samples 25 \
-    --hdbscan-min-cluster-size 25 \
-    --species "Abagrotis alternata"
+    --dbscan-min-eps 0.5 \
+    --dbscan-max-eps 2.0 \
+    --dbscan-eps-steps 4 \
+    --hdbscan-min-cluster-size 25
+    # --species ${SPECIES[@]}
 
 RETURN_CODE=$?
 echo "Python script return code: $RETURN_CODE"
 
-# Check output directory content after execution
-echo "Output directory content after execution:"
-ls -la ${OUTPUT_DIR}
+# Check for visualizations and output files
+echo "Checking output directory for results:"
+ls -la "$OUTPUT_DIR"
 
-# Check log directory content
-echo "Log directory content:"
-ls -la ${LOG_DIR}
+# Count the number of visualization files created
+NUM_VISUALIZATIONS=$(find "$OUTPUT_DIR" -name "*.png" | wc -l)
+echo "Number of visualization files created: $NUM_VISUALIZATIONS"
 
-# Print the latest log file
-LATEST_LOG=$(ls -t ${LOG_DIR}/*.log | head -1)
-if [ -n "$LATEST_LOG" ]; then
-    echo "Last 50 lines of the latest log file ($LATEST_LOG):"
-    tail -50 "$LATEST_LOG"
+# Check if stats file was created
+if [ -f "$OUTPUT_DIR/clustering_stats.json" ]; then
+    echo "Clustering statistics file created successfully"
+    # Print the first few lines to verify content
+    echo "First 10 lines of clustering_stats.json:"
+    head -n 10 "$OUTPUT_DIR/clustering_stats.json"
 else
-    echo "No log files found in $LOG_DIR"
-fi
-
-if [ $RETURN_CODE -ne 0 ]; then
-    echo "Job failed with return code $RETURN_CODE at $(date)"
-    exit $RETURN_CODE
+    echo "WARNING: Clustering statistics file not found"
 fi
 
 echo "Job completed at $(date)"
-echo "Visualizations should be available in $OUTPUT_DIR"
+echo "Visualizations are available in $OUTPUT_DIR"
+
+# Exit with the same code as the Python script
+exit $RETURN_CODE

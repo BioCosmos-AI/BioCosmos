@@ -954,6 +954,108 @@ def main():
         help="List of species to analyze",
     )
 
+    # Add DBSCAN eps range parameters
+    parser.add_argument(
+        "--dbscan-min-eps",
+        type=float,
+        default=0.5,
+        help="Minimum DBSCAN eps value to try",
+    )
+    parser.add_argument(
+        "--dbscan-max-eps",
+        type=float,
+        default=2.0,
+        help="Maximum DBSCAN eps value to try",
+    )
+    parser.add_argument(
+        "--dbscan-eps-steps",
+        type=int,
+        default=4,
+        help="Number of eps values to try between min and max",
+    )
+
+    # Parse arguments
+    args = parser.parse_args()
+
+    # Set up logging
+    logger = setup_logging(args.log_dir)
+    logger.info("Starting t-SNE-based clustering and visualization")
+    logger.info(f"Arguments: {args}")
+
+    # Handle graceful shutdown
+    def signal_handler(sig, frame):
+        logger.info("Received interrupt signal, shutting down gracefully...")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Generate DBSCAN eps range
+    dbscan_eps_range = np.linspace(
+        args.dbscan_min_eps, args.dbscan_max_eps, args.dbscan_eps_steps
+    )
+
+    # Load data for all target species
+    try:
+        df, embeddings_dict = load_data_for_species(
+            args.db_path, args.table_name, args.species, logger
+        )
+
+        if df.empty or not embeddings_dict:
+            logger.error("Failed to load data for target species")
+            return 1
+
+        # Process each species
+        all_stats = {}
+        for species_name in args.species:
+            logger.info(f"===== Processing species: {species_name} =====")
+
+            # Filter dataframe for this species
+            species_df = (
+                df[df["species_name"] == species_name].copy().reset_index(drop=True)
+            )
+
+            if len(species_df) < 10:
+                logger.warning(
+                    f"Not enough samples for {species_name} (found {len(species_df)}, need at least 10)"
+                )
+                continue
+
+            # Process this species
+            species_stats = process_species_data(
+                species_name,
+                species_df,
+                embeddings_dict,
+                args.min_k,
+                args.max_k,
+                args.dbscan_min_samples,
+                dbscan_eps_range,
+                args.hdbscan_min_cluster_size,
+                args.data_dir,
+                args.output_dir,
+                logger,
+            )
+
+            if species_stats:
+                all_stats[species_name] = species_stats
+
+        # Save overall results
+        if all_stats:
+            stats_file = os.path.join(args.output_dir, "clustering_stats.json")
+            with open(stats_file, "w") as f:
+                json.dump(numpy_to_python_types(all_stats), f, indent=2)
+            logger.info(f"Saved overall statistics to {stats_file}")
+        else:
+            logger.warning("No statistics generated for any species")
+
+        logger.info("t-SNE-based clustering and visualization completed successfully")
+        return 0
+
+    except Exception as e:
+        logger.error(f"Error in main function: {str(e)}")
+        logger.error(traceback.format_exc())
+        return 1
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
