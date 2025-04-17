@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:1              # Request 1 GPU
 #SBATCH --mem=96gb                # Memory for the node
 #SBATCH --time=12:00:00           # Maximum runtime (HH:MM:SS)
-#SBATCH --output=tsne_full_%j.log # Output log
+#SBATCH --output=tsne_full_GPU_%j.log # Output log
 #SBATCH --mail-type=END,FAIL      # Email notifications
 #SBATCH --open-mode=append        # Append to output files if restarted
 
@@ -37,8 +37,8 @@ echo "Python version: $(python --version)"
 DB_PATH="/blue/arthur.porto-biocosmos/tdeatherage3.gatech/embeddings/image_embeddings.sqlite"
 TABLE_NAME="image_embeddings"
 DATA_DIR="/blue/arthur.porto-biocosmos/data/datasets/TreeOfLife-10M/dataset/evobio10m-CVPR-2024/224x224/train"
-LOG_DIR="$HOME/logs/tsne_full_${SLURM_JOB_ID}"
-OUTPUT_DIR="$HOME/visualizations/sundry_tsne_clustering_2"
+LOG_DIR="$HOME/logs/tsne_full_GPU_${SLURM_JOB_ID}"
+OUTPUT_DIR="$HOME/visualizations/sundry_tsne_clustering_GPU"
 SCRIPT_PATH="$HOME/unicom/embedding_and_clustering/sundry_clustering_and_visuzalization.py"
 
 # Define the species to analyze - use the default list from the Python script

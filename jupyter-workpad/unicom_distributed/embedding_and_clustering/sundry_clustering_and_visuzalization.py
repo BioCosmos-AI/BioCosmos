@@ -10,8 +10,10 @@ import json
 from datetime import datetime
 from tqdm import tqdm
 import torch
-from sklearn.manifold import TSNE
-from sklearn.cluster import KMeans, DBSCAN
+
+# from sklearn.manifold import TSNE
+# from sklearn.cluster import KMeans, DBSCAN
+from sklearn.cluster import DBSCAN
 from scipy.cluster.hierarchy import linkage, fcluster
 from sklearn.metrics import silhouette_score
 from sklearn.metrics.pairwise import cosine_similarity
@@ -26,6 +28,13 @@ import tarfile
 import io
 from PIL import Image
 import traceback
+
+## GPU EXPERIMENT:
+import cuml
+from cuml.manifold import TSNE  # as cuTSNE
+from cuml.cluster import KMeans  # as cuKMeans
+
+## END GPU EXPERIMENT
 
 # Try to import HDBSCAN, handle cases where it's not installed
 try:
