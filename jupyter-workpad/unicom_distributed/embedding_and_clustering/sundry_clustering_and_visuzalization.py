@@ -130,7 +130,7 @@ def generate_tsne(embeddings, logger, n_components=2):
     )
 
     try:
-        tsne = TSNE(n_components=n_components, random_state=42)
+        tsne = TSNE(n_components=n_components, perplexity=15, random_state=42)
         logger.info("Starting t-SNE fit_transform - this may take a while...")
         tsne_result = tsne.fit_transform(embeddings)
 

@@ -38,7 +38,7 @@ DB_PATH="/blue/arthur.porto-biocosmos/tdeatherage3.gatech/embeddings/image_embed
 TABLE_NAME="image_embeddings"
 DATA_DIR="/blue/arthur.porto-biocosmos/data/datasets/TreeOfLife-10M/dataset/evobio10m-CVPR-2024/224x224/train"
 LOG_DIR="$HOME/logs/tsne_full_${SLURM_JOB_ID}"
-OUTPUT_DIR="$HOME/visualizations/sundry_tsne_clustering"
+OUTPUT_DIR="$HOME/visualizations/sundry_tsne_clustering_2"
 SCRIPT_PATH="$HOME/unicom/embedding_and_clustering/sundry_clustering_and_visuzalization.py"
 
 # Define the species to analyze - use the default list from the Python script
@@ -112,12 +112,12 @@ python "$SCRIPT_PATH" \
     --log-dir "$LOG_DIR" \
     --output-dir "$OUTPUT_DIR" \
     --min-k 2 \
-    --max-k 10 \
-    --dbscan-min-samples 25 \
-    --dbscan-min-eps 0.5 \
-    --dbscan-max-eps 2.0 \
-    --dbscan-eps-steps 4 \
-    --hdbscan-min-cluster-size 25
+    --max-k 20 \
+    --dbscan-min-samples 2 \
+    --dbscan-min-eps 0.1 \
+    --dbscan-max-eps 1.0 \
+    --dbscan-eps-steps 20 \
+    --hdbscan-min-cluster-size 2
     # --species ${SPECIES[@]}
 
 RETURN_CODE=$?
