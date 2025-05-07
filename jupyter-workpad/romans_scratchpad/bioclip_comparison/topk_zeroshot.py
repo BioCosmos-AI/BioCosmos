@@ -152,6 +152,6 @@ if __name__ == "__main__":
 
     test_loader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=False)
 
-    topk_accuracies = zero_shot_accuracy(test_loader, class_prototypes, prototype_to_idx, topk=(1, 3, 5))
+    topk_accuracies = zero_shot_accuracy(test_loader, class_prototypes, topk=(1, 3, 5))
     print(f"Top-k Accuracies: {topk_accuracies}")
 
