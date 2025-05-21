@@ -316,18 +316,30 @@ def save_checkpoint(
     return checkpoint_path
 
 
-def load_checkpoint(checkpoint_path, model, partial_fc, optimizer, scheduler, logger):
+def load_checkpoint(
+    checkpoint_path,
+    model,
+    partial_fc,
+    optimizer,
+    scheduler,
+    load_optimizer=True,
+    logger=None,
+):
     """Load training checkpoint."""
-    logger.info(f"Loading checkpoint from {checkpoint_path}")
+    if logger:
+        logger.info(f"Loading checkpoint from {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
-    model.module.load_state_dict(checkpoint["model_state_dict"])
+    # Just use model directly instead of model.module
+    model.load_state_dict(checkpoint["model_state_dict"])
 
     if "partial_fc_state_dict" in checkpoint:
         partial_fc.load_state_dict(checkpoint["partial_fc_state_dict"])
 
-    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    # Optimizer is very memory intensive.
+    if load_optimizer:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     if (
         scheduler
@@ -339,7 +351,9 @@ def load_checkpoint(checkpoint_path, model, partial_fc, optimizer, scheduler, lo
     start_epoch = checkpoint["epoch"] + 1
     class_to_idx = checkpoint.get("class_to_idx", None)
 
-    logger.info(f"Resumed from epoch {checkpoint['epoch']}")
+    if logger:
+        logger.info(f"Resumed from epoch {checkpoint['epoch']}")
+
     return start_epoch, class_to_idx
 
 
@@ -447,6 +461,12 @@ def main():
     parser.add_argument(
         "--resume", type=str, help="Path to checkpoint for resuming training"
     )
+    parser.add_argument(
+        "--use-checkpoint-classes",
+        action="store_true",
+        default=False,
+        help="Use class mapping from checkpoint instead of recreating it",
+    )
 
     args = parser.parse_args()
 
@@ -475,18 +495,48 @@ def main():
         logger.info(f"World size: {world_size}, Global rank: {global_rank}")
         logger.info(f"Args: {args}")
 
+    # Check if we should load class mapping from checkpoint first
+    class_to_idx = None
+    if args.resume and args.use_checkpoint_classes:
+        if os.path.isfile(args.resume):
+            if global_rank == 0:
+                logger.info(f"Loading class mapping from checkpoint: {args.resume}")
+            checkpoint = torch.load(args.resume, map_location="cpu")
+            if "class_to_idx" in checkpoint:
+                class_to_idx = checkpoint["class_to_idx"]
+                if global_rank == 0:
+                    logger.info(f"Loaded {len(class_to_idx)} classes from checkpoint")
+            else:
+                if global_rank == 0:
+                    logger.warning("No class mapping found in checkpoint")
+
     # Load data from SQLite (each process loads independently)
     # This avoids having to broadcast large data between processes
     start_time = time.time()
-    df, class_to_idx = load_data_from_sqlite(
-        args.db_path, logger if global_rank == 0 else None
-    )
+    if class_to_idx is None:
+        df, class_to_idx = load_data_from_sqlite(
+            args.db_path, logger if global_rank == 0 else None
+        )
+    else:
+        # Load dataframe anyway as we need it for training
+        df, _ = load_data_from_sqlite(
+            args.db_path, logger if global_rank == 0 else None
+        )
+        # But use the class_to_idx from the checkpoint
+        # Ensure all labels in df correspond to classes in class_to_idx
+        df["pseudo_class"] = (
+            df["species_name"] + "_" + df["single_node_cluster"].astype(str)
+        )
+        # Convert pseudo_class to integer label using checkpoint mapping
+        df = df[df["pseudo_class"].isin(class_to_idx.keys())]
+        df["label"] = df["pseudo_class"].map(class_to_idx)
+
     if global_rank == 0:
         logger.info(f"Data loading took {time.time() - start_time:.2f} seconds")
+        logger.info(f"Total classes: {len(class_to_idx)}")
 
     # Wait for all processes to complete data loading
     dist.barrier()
-
     # Save class mapping (only from rank 0)
     if global_rank == 0:
         with open(os.path.join(args.output_dir, "class_mapping.json"), "w") as f:
@@ -565,8 +615,15 @@ def main():
                 module_partial_fc,
                 optimizer,
                 scheduler,
-                logger if global_rank == 0 else None,
+                load_optimizer=True,
+                logger=logger if global_rank == 0 else None,
             )
+
+            # Clear memory because loading from checkpoint is very memory intensive
+            torch.cuda.empty_cache()
+            import gc
+
+            gc.collect()
 
             # Check if class mappings match
             if loaded_class_to_idx and loaded_class_to_idx != class_to_idx:

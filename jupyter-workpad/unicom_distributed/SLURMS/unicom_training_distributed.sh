@@ -11,6 +11,7 @@
 #SBATCH --mail-type=END,FAIL,TIME_LIMIT_50,TIME_LIMIT_80,TIME_LIMIT_90
 #SBATCH --requeue                   # Allow the job to be requeued
 #SBATCH --open-mode=append          # Append to output files if restarted
+#SBATCH --constraint=el8            # Use EL8 for conda  -- recommended in support ticket: https://support.rc.ufl.edu/show_bug.cgi?id=73092
 
 # Print job information
 echo "Job started at $(date)"
@@ -63,6 +64,10 @@ export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MASTER_PORT=$(( 30000 + RANDOM % 10000 ))
 export MASTER_ADDR=$(hostname -s)
 
+# Set PyTorch to use expandable segments for CUDA memory allocation
+# TO fix torch.outofmemoryerror
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # Print distributed training settings
 echo "Using MASTER_PORT: $MASTER_PORT"
 echo "Using MASTER_ADDR: $MASTER_ADDR"
@@ -72,7 +77,7 @@ RESUME_FLAG=""
 LATEST_CHECKPOINT=$(find ${CHECKPOINT_DIR} -name "unicom_checkpoint_*.pt" | sort -V | tail -n 1)
 if [ -n "$LATEST_CHECKPOINT" ]; then
     echo "Found checkpoint: $LATEST_CHECKPOINT"
-    RESUME_FLAG="--resume ${LATEST_CHECKPOINT}"
+    RESUME_FLAG="--resume ${LATEST_CHECKPOINT} --use-checkpoint-classes"
 fi
 
 # Run distributed training script
