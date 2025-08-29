@@ -539,6 +539,15 @@ def main():
     #     model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     # ) --> we didn't optimize partial_fc!!!! 
 
+    # Define margin loss for UNICOM
+    margin_loss = CombinedMarginLoss(
+        s=args.margin_loss_s,
+        m1=args.margin_loss_m1,
+        m2=args.margin_loss_m2,
+        m3=args.margin_loss_m3,
+        interclass_filtering_threshold=0.0,
+    )
+
     # Create Partial FC module for UNICOM training
     module_partial_fc = PartialFC_V2(
         margin_loss=margin_loss,
@@ -550,7 +559,6 @@ def main():
     )
 
     module_partial_fc.cuda()
-
 
     optimizer = optim.AdamW(
         params=[
@@ -584,15 +592,6 @@ def main():
 
     # Create mixed precision scaler
     scaler = GradScaler(enabled=args.use_amp)
-
-    # Define margin loss for UNICOM
-    margin_loss = CombinedMarginLoss(
-        s=args.margin_loss_s,
-        m1=args.margin_loss_m1,
-        m2=args.margin_loss_m2,
-        m3=args.margin_loss_m3,
-        interclass_filtering_threshold=0.0,
-    )
 
     # Wait for all processes to sync at this point
     dist.barrier()
