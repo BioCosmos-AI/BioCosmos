@@ -539,6 +539,19 @@ def main():
     #     model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     # ) --> we didn't optimize partial_fc!!!! 
 
+    # Create Partial FC module for UNICOM training
+    module_partial_fc = PartialFC_V2(
+        margin_loss=margin_loss,
+        embedding_size=embedding_dim,
+        num_classes=len(df["label"].unique()),
+        sample_rate=args.sample_rate,
+        fp16=args.use_amp,  # Enable/disable mixed precision
+        sample_num_feat=args.num_feat,
+    )
+
+    module_partial_fc.cuda()
+
+
     optimizer = optim.AdamW(
         params=[
             {"params": model.parameters(), "lr": args.lr},  # model backbone group
@@ -580,18 +593,6 @@ def main():
         m3=args.margin_loss_m3,
         interclass_filtering_threshold=0.0,
     )
-
-    # Create Partial FC module for UNICOM training
-    module_partial_fc = PartialFC_V2(
-        margin_loss=margin_loss,
-        embedding_size=embedding_dim,
-        num_classes=len(df["label"].unique()),
-        sample_rate=args.sample_rate,
-        fp16=args.use_amp,  # Enable/disable mixed precision
-        sample_num_feat=args.num_feat,
-    )
-
-    module_partial_fc.cuda()
 
     # Wait for all processes to sync at this point
     dist.barrier()
