@@ -335,7 +335,9 @@ def load_checkpoint(
     model.load_state_dict(checkpoint["model_state_dict"])
 
     if "partial_fc_state_dict" in checkpoint:
-        partial_fc.load_state_dict(checkpoint["partial_fc_state_dict"])
+        # SKIPPING THIS as it interferes with reloading the model/weights from checkpoint
+        # partial_fc.load_state_dict(checkpoint["partial_fc_state_dict"])
+        pass
 
     # Optimizer is very memory intensive.
     if load_optimizer:
@@ -425,7 +427,6 @@ def main():
     parser.add_argument(
         "--use-amp",
         action="store_true",
-        # default=False,  # I had trouble with this == True
         default=True,
         help="Use automatic mixed precision",
     )
@@ -510,26 +511,34 @@ def main():
                 if global_rank == 0:
                     logger.warning("No class mapping found in checkpoint")
 
-    # Load data from SQLite (each process loads independently)
-    # This avoids having to broadcast large data between processes
+    # Load data from SQLite
     start_time = time.time()
     if class_to_idx is None:
+        # Fresh start - create class mapping from scratch
         df, class_to_idx = load_data_from_sqlite(
             args.db_path, logger if global_rank == 0 else None
         )
     else:
-        # Load dataframe anyway as we need it for training
+        # Resume from checkpoint - use existing class mapping
         df, _ = load_data_from_sqlite(
             args.db_path, logger if global_rank == 0 else None
         )
-        # But use the class_to_idx from the checkpoint
-        # Ensure all labels in df correspond to classes in class_to_idx
+
+        # Create pseudo_class labels
         df["pseudo_class"] = (
             df["species_name"] + "_" + df["single_node_cluster"].astype(str)
         )
-        # Convert pseudo_class to integer label using checkpoint mapping
-        df = df[df["pseudo_class"].isin(class_to_idx.keys())]
+
+        # Map pseudo_class to labels using checkpoint's class_to_idx
+        # Any pseudo_class not in checkpoint gets filtered out
         df["label"] = df["pseudo_class"].map(class_to_idx)
+        df = df.dropna(subset=["label"])
+        df["label"] = df["label"].astype(int)
+
+        if global_rank == 0:
+            logger.info(
+                f"After mapping to checkpoint classes: {len(df)} samples remain"
+            )
 
     if global_rank == 0:
         logger.info(f"Data loading took {time.time() - start_time:.2f} seconds")
@@ -537,6 +546,7 @@ def main():
 
     # Wait for all processes to complete data loading
     dist.barrier()
+
     # Save class mapping (only from rank 0)
     if global_rank == 0:
         with open(os.path.join(args.output_dir, "class_mapping.json"), "w") as f:
@@ -546,7 +556,6 @@ def main():
     if global_rank == 0:
         logger.info("Loading pretrained ViT-H-14-378-quickgelu model (dfn5b)")
 
-    # The function returns model, tokenizer (which we don't need), and transform
     model, _, preprocess_train = open_clip.create_model_and_transforms(
         "ViT-H-14-378-quickgelu", pretrained="dfn5b"
     )
@@ -590,13 +599,16 @@ def main():
         interclass_filtering_threshold=0.0,
     )
 
-    # Create Partial FC module for UNICOM training
+    # Create Partial FC module - use class_to_idx length to match checkpoint exactly
+    if global_rank == 0:
+        logger.info(f"Creating PartialFC with {len(class_to_idx)} classes")
+
     module_partial_fc = PartialFC_V2(
         margin_loss=margin_loss,
         embedding_size=embedding_dim,
-        num_classes=len(class_to_idx),
+        num_classes=len(class_to_idx),  # Always use checkpoint's class count
         sample_rate=args.sample_rate,
-        fp16=args.use_amp,  # Enable/disable mixed precision
+        fp16=args.use_amp,
         sample_num_feat=args.num_feat,
     )
 
@@ -625,11 +637,12 @@ def main():
 
             gc.collect()
 
-            # Check if class mappings match
-            if loaded_class_to_idx and loaded_class_to_idx != class_to_idx:
+            # Verify class mappings match
+            if loaded_class_to_idx and len(loaded_class_to_idx) != len(class_to_idx):
                 if global_rank == 0:
                     logger.warning(
-                        "Class mappings in checkpoint don't match current mapping"
+                        f"Class count mismatch: checkpoint has {len(loaded_class_to_idx)}, "
+                        f"current has {len(class_to_idx)}"
                     )
         else:
             if global_rank == 0:
@@ -643,6 +656,7 @@ def main():
         find_unused_parameters=False,
     )
 
+    # Create dataset
     dataset = TreeOfLifeWebDataset(
         args.webdataset_path,
         df,
@@ -651,29 +665,6 @@ def main():
         rank=local_rank,  # Local rank within node
         batch_size=args.batch_size,
     )
-
-    # Create sampler
-    # Using webdataset's own distributed sampler
-    # sampler = DistributedSampler(
-    #     dataset, num_replicas=world_size, rank=global_rank, shuffle=True, seed=args.seed
-    # )
-
-    # Create WebLoader directly without a sampler
-    # train_loader = wds.WebLoader(
-    #     dataset,
-    #     batch_size=args.batch_size,
-    #     num_workers=args.num_workers,
-    #     pin_memory=True,
-    #     shuffle=False,  # WebDataset handles shuffling differently
-    # )
-
-    # train_loader = train_loader.shuffle(1000)  # Buffer size of 1000
-
-    # def set_epoch(epoch):
-    #     # Set a different seed for each epoch for shuffling
-    #     random.seed(args.seed + epoch + global_rank * 100)
-
-    # train_loader.set_epoch = set_epoch
 
     if global_rank == 0:
         logger.info(f"Starting training from epoch {start_epoch} to {args.epochs}")
