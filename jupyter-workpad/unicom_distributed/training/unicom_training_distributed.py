@@ -26,13 +26,16 @@ import math
 from collections import defaultdict
 from PIL import Image
 
+from eval_utils import create_tester_embed_dataset
+
 from partial_fc import CombinedMarginLoss, PartialFC_V2
 
+print(torch.cuda.get_arch_list())
 
 os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
 os.environ["NCCL_BLOCKING_WAIT"] = "1"
 os.environ["NCCL_DEBUG"] = "INFO"
-os.environ["TORCH_DISTRIBUTED_TIMEOUT"] = "1800"  # 30 minutes in seconds
+os.environ["TORCH_DISTRIBUTED_TIMEOUT"] = "18000"  # 30 minutes in seconds
 
 
 def setup_logging(log_dir):
@@ -267,8 +270,9 @@ def train_epoch(
             scaler.update()
             optimizer.zero_grad()
 
-        if scheduler is not None:
-            scheduler.step()
+            # Only step() when the optimizer above also steps
+            if scheduler is not None:
+                scheduler.step()
 
         # Record loss
         losses.append(loss.item())
@@ -403,7 +407,7 @@ def main():
     parser.add_argument(
         "--epochs", type=int, default=32, help="Number of training epochs"
     )
-    parser.add_argument("--lr", type=float, default=0.0001, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=2.8e-5, help="Learning rate")
     parser.add_argument("--weight-decay", type=float, default=0.05, help="Weight decay")
     parser.add_argument(
         "--gradient-acc", type=int, default=1, help="Gradient accumulation steps"
@@ -435,7 +439,7 @@ def main():
     parser.add_argument(
         "--sample-rate",
         type=float,
-        default=0.1,
+        default=0.125,
         help="Sample rate for random class selection",
     )
     parser.add_argument(
@@ -467,6 +471,14 @@ def main():
         action="store_true",
         default=False,
         help="Use class mapping from checkpoint instead of recreating it",
+    )
+    parser.add_argument(
+        "--lr-pfc-weight", type=float, default=10.0,
+        help="The weight to apply to the learning rate for the Partial FC layer during training. Sure, when fine-tuning a pre-trained neural network, it is usually recommended to adjust the learning rates of different layers in order to achieve better performance. For example, the learning rate of the backbone layers (i.e., the pre-trained layers) should be set lower because they already have learned features, while the learning rate of the Partial FC layer should be set higher, as it needs to adapt to the new task"
+    )
+    # Roman's in-training eval
+    parser.add_argument(
+        "--tester-path", required=True, help="Path where tester .csv file was saved "
     )
 
     args = parser.parse_args()
@@ -554,10 +566,10 @@ def main():
 
     # Get the CLIP model and transforms
     if global_rank == 0:
-        logger.info("Loading pretrained ViT-H-14-378-quickgelu model (dfn5b)")
+        logger.info("Loading pretrained ViT-H-14-quickgelu model (dfn5b)")
 
     model, _, preprocess_train = open_clip.create_model_and_transforms(
-        "ViT-H-14-378-quickgelu", pretrained="dfn5b"
+        "ViT-H-14-quickgelu", pretrained="dfn5b"
     )
 
     # Get embedding dimension from the model
@@ -571,21 +583,13 @@ def main():
     model.cuda()
 
     # Create optimizer
-    optimizer = optim.AdamW(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
-    )
+    # optimizer = optim.AdamW(
+    #     model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+    # )
 
     # Create learning rate scheduler
     steps_per_epoch = len(df) // (world_size * args.batch_size) + 1
     total_steps = args.epochs * steps_per_epoch
-
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer=optimizer,
-        max_lr=args.lr,
-        total_steps=total_steps,
-        pct_start=0.1,
-        anneal_strategy="cos",
-    )
 
     # Create mixed precision scaler
     scaler = GradScaler(enabled=args.use_amp)
@@ -613,6 +617,24 @@ def main():
     )
 
     module_partial_fc.cuda()
+
+    optimizer = optim.AdamW(
+        params=[
+            {"params": model.parameters(), "lr": args.lr},  # model backbone group
+            {"params": module_partial_fc.parameters(), "lr": args.lr * args.lr_pfc_weight},  # partial fc params
+        ],
+        lr=args.lr,  
+        weight_decay=args.weight_decay,
+    )
+
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer=optimizer,
+        max_lr=args.lr,
+        total_steps=total_steps,
+        pct_start=0.1,
+        anneal_strategy="cos",
+    )
+
 
     # Wait for all processes to sync at this point
     dist.barrier()
@@ -689,8 +711,13 @@ def main():
             dataset=dataset,
         )
 
+        dist.barrier()
+
         if global_rank == 0:
             logger.info(f"Epoch {epoch} completed. Avg loss: {train_loss:.4f}")
+            topk_accuracies = create_tester_embed_dataset(model, preprocess_train, args.tester_path)
+            logger.info(f"Top-k accuracies (true labels) at epoch {epoch}: {topk_accuracies}")
+
 
             # Save checkpoint
             if (epoch + 1) % args.checkpoint_freq == 0 or epoch == args.epochs - 1:
@@ -704,6 +731,7 @@ def main():
                     args.checkpoint_dir,
                     logger,
                 )
+        dist.barrier()
 
     # Save final model
     if global_rank == 0:

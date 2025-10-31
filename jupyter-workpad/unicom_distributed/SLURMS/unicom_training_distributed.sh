@@ -1,17 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=unicom_train
-#SBATCH --partition=gpu             # GPU partition
-#SBATCH --nodes=1                   # Request 1 node
-#SBATCH --ntasks-per-node=8         # Use 8 GPUs on the node (adjust as needed)
-#SBATCH --cpus-per-task=8           # 8 CPUs per GPU for data loading
-#SBATCH --gres=gpu:a100:8           # Request 8 A100 GPUs
-#SBATCH --mem=500gb                 # Memory for the node (high for SQLite DB in memory)
-#SBATCH --time=14-00:00:00           # Maximum runtime 
-#SBATCH --output=/blue/arthur.porto-biocosmos/tdeatherage3.gatech/logs/unicom_training_distributed_%j.log
+#SBATCH --job-name=fall_unicom_train
+#SBATCH --partition=hpg-b200        
+#SBATCH --nodes=1                   
+#SBATCH --ntasks-per-node=8         # 8 GPUs
+#SBATCH --cpus-per-task=8           # 8 CPUs per GPU (64 total)
+#SBATCH --gres=gpu:b200:8           # Request 8 B200 GPUs
+#SBATCH --mem=500gb                 # Memory
+#SBATCH --time=14-00:00:00          
+#SBATCH --output=/blue/arthur.porto-biocosmos/tdeatherage3.gatech/logs/fall_unicom_training_distributed_%j.log
 #SBATCH --mail-type=END,FAIL,TIME_LIMIT_50,TIME_LIMIT_80,TIME_LIMIT_90
-#SBATCH --requeue                   # Allow the job to be requeued
-#SBATCH --open-mode=append          # Append to output files if restarted
-#SBATCH --constraint=el8            # Use EL8 for conda  -- recommended in support ticket: https://support.rc.ufl.edu/show_bug.cgi?id=73092
+#SBATCH --requeue                   
+#SBATCH --open-mode=append
+
 
 # Print job information
 echo "Job started at $(date)"
@@ -27,7 +27,7 @@ module load conda
 eval "$(conda shell.bash hook)"
 
 # Set path to conda environment
-CONDA_ENV_PATH=/blue/arthur.porto-biocosmos/tdeatherage3.gatech/conda/envs/unicom_distributed
+CONDA_ENV_PATH=/blue/arthur.porto-biocosmos/tdeatherage3.gatech/conda/envs/unicom_distributed_b200
 
 # Activate conda environment
 conda activate ${CONDA_ENV_PATH}
@@ -41,14 +41,15 @@ OUTPUT_DIR="/blue/arthur.porto-biocosmos/tdeatherage3.gatech/unicom/output"
 # CHECKPOINT_DIR="/home/tdeatherage3.gatech/unicom/checkpoints"
 CHECKPOINT_DIR="/blue/arthur.porto-biocosmos/tdeatherage3.gatech/unicom/checkpoints"
 # LOG_DIR="/home/tdeatherage3.gatech/logs/unicom_train_${SLURM_JOB_ID}"
-LOG_DIR="/blue/arthur.porto-biocosmos/tdeatherage3.gatech/logs/unicom_training_distributed_${SLURM_JOB_ID}"
+LOG_DIR="/blue/arthur.porto-biocosmos/tdeatherage3.gatech/logs/fall_unicom_training_distributed_${SLURM_JOB_ID}"
+TEST_FILE_PATH="/home/tdeatherage3.gatech/unicom/test_eval_data/test_eval_vlm4bio.csv"
 
 # Set training parameters
-BATCH_SIZE=16  # Per GPU
+# BATCH_SIZE=64  # Per GPU
 EPOCHS=32
-LR=0.0001
-SAMPLE_RATE=0.1  # For random class selection (partial FC)
-NUM_FEAT=768     # For random feature selection
+# LR=0.0001
+# SAMPLE_RATE=0.1  # For random class selection (partial FC)
+# NUM_FEAT=768     # For random feature selection
 
 # Create required directories
 mkdir -p ${OUTPUT_DIR}
@@ -88,11 +89,8 @@ torchrun --nnodes=1 --node_rank=0 --nproc_per_node=$SLURM_NTASKS_PER_NODE --mast
     --output-dir "$OUTPUT_DIR" \
     --checkpoint-dir "$CHECKPOINT_DIR" \
     --log-dir "$LOG_DIR" \
-    --batch-size "$BATCH_SIZE" \
     --epochs "$EPOCHS" \
-    --lr "$LR" \
-    --sample-rate "$SAMPLE_RATE" \
-    --num-feat "$NUM_FEAT" \
+    --tester-path "$TEST_FILE_PATH" \
     $RESUME_FLAG
 
 RETURN_CODE=$?
