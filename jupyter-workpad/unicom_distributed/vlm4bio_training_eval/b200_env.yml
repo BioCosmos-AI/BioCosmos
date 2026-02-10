@@ -1,0 +1,28 @@
+name: unicom_b200_p2
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - accelerate
+  - bidict
+  - biopython
+  - ipykernel
+  - numpy
+  - pandas
+  - pillow
+  - pygbif
+  - scikit-learn
+  - tqdm
+  - requests
+  - pip
+  - pip:
+    - --extra-index-url https://download.pytorch.org/whl/cu128
+    - torch==2.7.1+cu128
+    - torchvision==0.22.1+cu128
+    - torchaudio==2.7.1+cu128
+    - transformers
+    - datasets
+    - open_clip_torch
+    - webdataset
+
